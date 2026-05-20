@@ -17,9 +17,12 @@ export async function GET() {
       planItemTags,
       planItemDayStates,
       progressEntries,
+      progressEntryTags,
       noteEntries,
       manualActualGroups,
-      manualActualItems
+      manualActualGroupTags,
+      manualActualItems,
+      trashEntries
     ] = await Promise.all([
       db.day.findMany({
         where: { userId: user.id },
@@ -53,6 +56,10 @@ export async function GET() {
         where: { userId: user.id },
         orderBy: [{ createdAt: "asc" }]
       }),
+      db.progressEntryTag.findMany({
+        where: { userId: user.id },
+        orderBy: [{ createdAt: "asc" }]
+      }),
       db.noteEntry.findMany({
         where: { userId: user.id },
         orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }]
@@ -61,6 +68,10 @@ export async function GET() {
         where: { userId: user.id },
         orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }]
       }),
+      db.manualActualGroupTag.findMany({
+        where: { userId: user.id },
+        orderBy: [{ createdAt: "asc" }]
+      }),
       db.manualActualItem.findMany({
         where: {
           group: {
@@ -68,13 +79,17 @@ export async function GET() {
           }
         },
         orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }]
+      }),
+      db.trashEntry.findMany({
+        where: { userId: user.id },
+        orderBy: [{ createdAt: "asc" }]
       })
     ]);
 
     const payload = {
       meta: {
         product: "Dayfold",
-        exportVersion: 4,
+        exportVersion: 5,
         exportedAt: new Date().toISOString()
       },
       user: {
@@ -154,6 +169,12 @@ export async function GET() {
           createdAt: entry.createdAt.toISOString(),
           updatedAt: entry.updatedAt.toISOString()
         })),
+        progressEntryTags: progressEntryTags.map((entry) => ({
+          id: entry.id,
+          progressEntryId: entry.progressEntryId,
+          tagId: entry.tagId,
+          createdAt: entry.createdAt.toISOString()
+        })),
         noteEntries: noteEntries.map((entry) => ({
           id: entry.id,
           dayId: entry.dayId,
@@ -173,6 +194,12 @@ export async function GET() {
           createdAt: group.createdAt.toISOString(),
           updatedAt: group.updatedAt.toISOString()
         })),
+        manualActualGroupTags: manualActualGroupTags.map((entry) => ({
+          id: entry.id,
+          manualActualGroupId: entry.manualActualGroupId,
+          tagId: entry.tagId,
+          createdAt: entry.createdAt.toISOString()
+        })),
         manualActualItems: manualActualItems.map((item) => ({
           id: item.id,
           groupId: item.groupId,
@@ -180,6 +207,16 @@ export async function GET() {
           displayOrder: item.displayOrder,
           createdAt: item.createdAt.toISOString(),
           updatedAt: item.updatedAt.toISOString()
+        })),
+        trashEntries: trashEntries.map((entry) => ({
+          id: entry.id,
+          kind: entry.kind,
+          title: entry.title,
+          payload: entry.payload,
+          expiresAt: entry.expiresAt.toISOString(),
+          restoredAt: entry.restoredAt?.toISOString() ?? null,
+          createdAt: entry.createdAt.toISOString(),
+          updatedAt: entry.updatedAt.toISOString()
         }))
       }
     };
