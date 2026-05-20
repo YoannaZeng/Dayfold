@@ -1,0 +1,38 @@
+{
+  "name": "dayfold-app-v2",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "predev": "node ./scripts/check-local-dev.mjs",
+    "dev": "node ./scripts/dev-with-preview.mjs",
+    "dev:server": "next dev --hostname 127.0.0.1 --port 3001",
+    "predev:test": "node ./scripts/check-local-dev.mjs",
+    "dev:test": "NEXT_DIST_DIR=.next-test DATABASE_URL=postgresql://mvbj0674@localhost:5432/dayfold_test next dev --hostname 127.0.0.1 --port 3002",
+    "dev:reset": "node ./scripts/reset-dev-cache.mjs",
+    "build": "next build",
+    "vercel-build": "npm run prisma:generate && next build",
+    "start": "next start",
+    "prisma:generate": "prisma generate --schema prisma/schema.prisma",
+    "verify:phaseA": "npm run prisma:generate && prisma validate --schema prisma/schema.prisma && npm run build",
+    "verify:phaseB": "node ./scripts/phaseB-auth-safety-check.mjs",
+    "verify:phaseC": "npm run verify:phaseA && npm run verify:deploy-env",
+    "verify:deploy-env": "node ./scripts/verify-deploy-env.mjs",
+    "verify:quick": "node ./scripts/quick-smoke-check.mjs",
+    "verify:smoke": "node ./scripts/phase1-smoke-check.mjs",
+    "verify:phase2": "node ./scripts/phase2-smoke-check.mjs"
+  },
+  "dependencies": {
+    "@prisma/client": "^6.8.2",
+    "next": "^15.3.2",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zod": "^3.24.4"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.17",
+    "@types/react": "^19.0.12",
+    "@types/react-dom": "^19.0.4",
+    "prisma": "^6.8.2",
+    "typescript": "^5.8.3"
+  }
+}

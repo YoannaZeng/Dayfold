@@ -1,0 +1,25 @@
+.next
+.next-test
+.next-stale-*
+node_modules
+tsconfig.tsbuildinfo
+.DS_Store
+
+# Environment variables (contains secrets!)
+.env
+.env.local
+.env.*.local
+
+# Logs
+*.log
+npm-debug.log*
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+
+# Prisma generated client (regenerate with: npm run prisma:generate)
+generated/

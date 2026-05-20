@@ -1,0 +1,321 @@
+generator client {
+  provider = "prisma-client-js"
+  output   = "../generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id                 String              @id @default(cuid())
+  email              String              @unique
+  name               String?
+  passwordHash       String?
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  days               Day[]
+  weeks              Week[]
+  planSections       PlanSection[]
+  planItems          PlanItem[]
+  tags               Tag[]
+  planItemTags       PlanItemTag[]
+  progressEntryTags  ProgressEntryTag[]
+  manualActualGroupTags ManualActualGroupTag[]
+  planItemDayStates  PlanItemDayState[]
+  progressEntries    ProgressEntry[]
+  noteEntries        NoteEntry[]
+  manualActualGroups ManualActualGroup[]
+  trashEntries       TrashEntry[]
+  sessions           Session[]
+}
+
+model Session {
+  id         String   @id @default(cuid())
+  userId     String
+  tokenHash  String   @unique
+  expiresAt  DateTime
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, expiresAt])
+}
+
+model AuthRateLimit {
+  id           String   @id @default(cuid())
+  scope        String
+  identifier   String
+  attemptCount Int      @default(0)
+  windowStart  DateTime @default(now())
+  blockedUntil DateTime?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  @@unique([scope, identifier])
+  @@index([blockedUntil])
+}
+
+model Day {
+  id                 String              @id @default(cuid())
+  userId             String
+  date               DateTime
+  note               String              @default("")
+  createdAt          DateTime            @default(now())
+  updatedAt          DateTime            @updatedAt
+  user               User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  sections           PlanSection[]
+  planItemStates     PlanItemDayState[]
+  progressEntries    ProgressEntry[]
+  noteEntries        NoteEntry[]
+  manualActualGroups ManualActualGroup[]
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}
+
+model Week {
+  id            String     @id @default(cuid())
+  userId        String
+  weekStartDate DateTime
+  review        String     @default("")
+  createdAt     DateTime   @default(now())
+  updatedAt     DateTime   @updatedAt
+  user          User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planItems     PlanItem[]
+
+  @@unique([userId, weekStartDate])
+  @@index([userId, weekStartDate])
+}
+
+model PlanSection {
+  id           String       @id @default(cuid())
+  userId       String
+  dayId        String
+  kind         SectionKind
+  title        String
+  placeholder  String
+  tone         SectionTone
+  isCustom     Boolean      @default(false)
+  displayOrder Int          @default(0)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day          Day          @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  planItems    PlanItem[]
+
+  @@index([userId, dayId, displayOrder])
+  @@unique([dayId, kind, displayOrder])
+}
+
+model PlanItem {
+  id            String             @id @default(cuid())
+  userId        String
+  sectionId     String?
+  weekId        String?
+  scope         PlanItemScope
+  sectionKind   SectionKind
+  title         String
+  monthStart    DateTime?
+  sourceItemId  String?
+  displayOrder  Int                @default(0)
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  user          User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  section       PlanSection?       @relation(fields: [sectionId], references: [id], onDelete: Cascade)
+  week          Week?              @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  sourceItem    PlanItem?          @relation("PlanItemSource", fields: [sourceItemId], references: [id], onDelete: SetNull)
+  derivedItems  PlanItem[]         @relation("PlanItemSource")
+  tags          PlanItemTag[]
+  dayStates     PlanItemDayState[]
+  progressEntries ProgressEntry[]
+  noteEntries   NoteEntry[]
+
+  @@index([userId, sectionId, displayOrder])
+  @@index([userId, weekId, displayOrder])
+  @@index([userId, monthStart, displayOrder])
+  @@index([sourceItemId])
+}
+
+model Tag {
+  id           String        @id @default(cuid())
+  userId       String
+  name         String
+  normalized   String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planItemTags PlanItemTag[]
+  progressEntryTags ProgressEntryTag[]
+  manualActualGroupTags ManualActualGroupTag[]
+
+  @@unique([userId, normalized])
+  @@index([userId, name])
+}
+
+model PlanItemTag {
+  id         String   @id @default(cuid())
+  userId     String
+  planItemId String
+  tagId      String
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planItem   PlanItem @relation(fields: [planItemId], references: [id], onDelete: Cascade)
+  tag        Tag      @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([planItemId, tagId])
+  @@index([userId, tagId])
+  @@index([userId, planItemId])
+}
+
+model PlanItemDayState {
+  id         String   @id @default(cuid())
+  userId     String
+  planItemId String
+  dayId      String
+  completed  Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  planItem   PlanItem @relation(fields: [planItemId], references: [id], onDelete: Cascade)
+  day        Day      @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@unique([planItemId, dayId])
+  @@index([userId, dayId])
+}
+
+model ProgressEntry {
+  id            String    @id @default(cuid())
+  userId        String
+  dayId         String
+  planItemId    String?
+  titleSnapshot String
+  content       String
+  startMinute   Int
+  endMinute     Int
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  user          User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day           Day       @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  planItem      PlanItem? @relation(fields: [planItemId], references: [id], onDelete: Cascade)
+  tags          ProgressEntryTag[]
+
+  @@index([userId, dayId, startMinute, createdAt])
+  @@index([planItemId])
+}
+
+model ProgressEntryTag {
+  id              String        @id @default(cuid())
+  userId          String
+  progressEntryId String
+  tagId           String
+  createdAt       DateTime      @default(now())
+  user            User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  progressEntry   ProgressEntry @relation(fields: [progressEntryId], references: [id], onDelete: Cascade)
+  tag             Tag           @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([progressEntryId, tagId])
+  @@index([userId, tagId])
+  @@index([userId, progressEntryId])
+}
+
+model NoteEntry {
+  id            String        @id @default(cuid())
+  userId        String
+  dayId         String
+  planItemId    String?
+  kind          NoteEntryKind @default(PLAIN)
+  titleSnapshot String?
+  content       String
+  displayOrder  Int           @default(0)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  user          User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day           Day           @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  planItem      PlanItem?     @relation(fields: [planItemId], references: [id], onDelete: SetNull)
+
+  @@index([userId, dayId, displayOrder])
+  @@index([planItemId])
+}
+
+model ManualActualGroup {
+  id           String             @id @default(cuid())
+  userId       String
+  dayId        String
+  title        String
+  displayOrder Int                @default(0)
+  createdAt    DateTime           @default(now())
+  updatedAt    DateTime           @updatedAt
+  user         User               @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day          Day                @relation(fields: [dayId], references: [id], onDelete: Cascade)
+  items        ManualActualItem[]
+  tags         ManualActualGroupTag[]
+
+  @@index([userId, dayId, displayOrder])
+}
+
+model ManualActualGroupTag {
+  id                  String            @id @default(cuid())
+  userId              String
+  manualActualGroupId String
+  tagId               String
+  createdAt           DateTime          @default(now())
+  user                User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  manualActualGroup   ManualActualGroup @relation(fields: [manualActualGroupId], references: [id], onDelete: Cascade)
+  tag                 Tag               @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@unique([manualActualGroupId, tagId])
+  @@index([userId, tagId])
+  @@index([userId, manualActualGroupId])
+}
+
+model ManualActualItem {
+  id           String            @id @default(cuid())
+  groupId      String
+  content      String
+  displayOrder Int               @default(0)
+  createdAt    DateTime          @default(now())
+  updatedAt    DateTime          @updatedAt
+  group        ManualActualGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
+
+  @@index([groupId, displayOrder])
+}
+
+model TrashEntry {
+  id          String    @id @default(cuid())
+  userId      String
+  kind        String
+  title       String
+  payload     Json
+  expiresAt   DateTime
+  restoredAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, restoredAt, expiresAt, createdAt])
+}
+
+enum SectionKind {
+  TODAY
+  WEEK
+  LONG
+  CUSTOM
+}
+
+enum SectionTone {
+  PRIMARY
+  SECONDARY
+}
+
+enum PlanItemScope {
+  DAY
+  WEEK
+  MONTH
+}
+
+enum NoteEntryKind {
+  PLAIN
+  PROJECT
+}
