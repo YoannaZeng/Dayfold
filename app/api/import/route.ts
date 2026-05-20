@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
 import { AuthError, requireCurrentUser } from "@/lib/server/auth";
-import { NoteEntryKind } from "@/generated/prisma";
+import { NoteEntryKind, type Prisma } from "@/generated/prisma";
 import { db } from "@/lib/db";
 import { fromDateKey } from "@/lib/dates";
 import { parseNoteEntries } from "@/lib/note-entries";
@@ -131,6 +131,31 @@ const noteEntrySchema = z.object({
   updatedAt: z.string()
 });
 
+const progressEntryTagSchema = z.object({
+  id: z.string(),
+  progressEntryId: z.string(),
+  tagId: z.string(),
+  createdAt: z.string()
+});
+
+const manualActualGroupTagSchema = z.object({
+  id: z.string(),
+  manualActualGroupId: z.string(),
+  tagId: z.string(),
+  createdAt: z.string()
+});
+
+const trashEntrySchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  title: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+  expiresAt: z.string(),
+  restoredAt: z.string().nullable(),
+  createdAt: z.string(),
+  updatedAt: z.string()
+});
+
 const importSchema = z.object({
   meta: z.object({
     product: z.string(),
@@ -146,11 +171,48 @@ const importSchema = z.object({
     planItemTags: z.array(planItemTagSchema).default([]),
     planItemDayStates: z.array(planItemDayStateSchema),
     progressEntries: z.array(progressEntrySchema),
+    progressEntryTags: z.array(progressEntryTagSchema).default([]),
     noteEntries: z.array(noteEntrySchema).default([]),
     manualActualGroups: z.array(manualActualGroupSchema),
-    manualActualItems: z.array(manualActualItemSchema)
+    manualActualGroupTags: z.array(manualActualGroupTagSchema).default([]),
+    manualActualItems: z.array(manualActualItemSchema),
+    trashEntries: z.array(trashEntrySchema).default([])
   })
 });
+
+function assertImportedReference(
+  label: string,
+  ids: Set<string>,
+  referencedId: string
+) {
+  if (!ids.has(referencedId)) {
+    throw new Error(`${label} 引用了不存在的记录：${referencedId}`);
+  }
+}
+
+function validateImportCompleteness(data: z.infer<typeof importSchema>["data"]) {
+  const tagIds = new Set(data.tags.map((entry) => entry.id));
+  const progressEntryIds = new Set(data.progressEntries.map((entry) => entry.id));
+  const manualActualGroupIds = new Set(data.manualActualGroups.map((entry) => entry.id));
+
+  data.progressEntryTags.forEach((entry) => {
+    assertImportedReference("ProgressEntryTag.progressEntryId", progressEntryIds, entry.progressEntryId);
+    assertImportedReference("ProgressEntryTag.tagId", tagIds, entry.tagId);
+  });
+
+  data.manualActualGroupTags.forEach((entry) => {
+    assertImportedReference(
+      "ManualActualGroupTag.manualActualGroupId",
+      manualActualGroupIds,
+      entry.manualActualGroupId
+    );
+    assertImportedReference("ManualActualGroupTag.tagId", tagIds, entry.tagId);
+  });
+}
+
+function toJsonInput(value: Record<string, unknown>): Prisma.InputJsonValue {
+  return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -159,11 +221,25 @@ export async function POST(request: NextRequest) {
     const body = await request.json();
     const parsed = importSchema.parse(body);
 
-    if (parsed.meta.product !== "Dayfold" || ![1, 2, 3, 4].includes(parsed.meta.exportVersion)) {
+    if (parsed.meta.product !== "Dayfold" || ![1, 2, 3, 4, 5].includes(parsed.meta.exportVersion)) {
       return NextResponse.json({ error: "暂不支持这个备份文件版本。" }, { status: 400 });
     }
 
+    validateImportCompleteness(parsed.data);
+
     await db.$transaction(async (tx) => {
+      await tx.progressEntryTag.deleteMany({
+        where: { userId: user.id }
+      });
+
+      await tx.manualActualGroupTag.deleteMany({
+        where: { userId: user.id }
+      });
+
+      await tx.trashEntry.deleteMany({
+        where: { userId: user.id }
+      });
+
       await tx.manualActualItem.deleteMany({
         where: {
           group: {
@@ -336,6 +412,18 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      if (parsed.data.progressEntryTags.length) {
+        await tx.progressEntryTag.createMany({
+          data: parsed.data.progressEntryTags.map((entry) => ({
+            id: entry.id,
+            userId: user.id,
+            progressEntryId: entry.progressEntryId,
+            tagId: entry.tagId,
+            createdAt: new Date(entry.createdAt)
+          }))
+        });
+      }
+
       if (parsed.data.noteEntries.length) {
         const planItemIds = new Set(parsed.data.planItems.map((item) => item.id));
 
@@ -406,6 +494,18 @@ export async function POST(request: NextRequest) {
         });
       }
 
+      if (parsed.data.manualActualGroupTags.length) {
+        await tx.manualActualGroupTag.createMany({
+          data: parsed.data.manualActualGroupTags.map((entry) => ({
+            id: entry.id,
+            userId: user.id,
+            manualActualGroupId: entry.manualActualGroupId,
+            tagId: entry.tagId,
+            createdAt: new Date(entry.createdAt)
+          }))
+        });
+      }
+
       if (parsed.data.manualActualItems.length) {
         await tx.manualActualItem.createMany({
           data: parsed.data.manualActualItems.map((item) => ({
@@ -415,6 +515,22 @@ export async function POST(request: NextRequest) {
             displayOrder: item.displayOrder,
             createdAt: new Date(item.createdAt),
             updatedAt: new Date(item.updatedAt)
+          }))
+        });
+      }
+
+      if (parsed.data.trashEntries.length) {
+        await tx.trashEntry.createMany({
+          data: parsed.data.trashEntries.map((entry) => ({
+            id: entry.id,
+            userId: user.id,
+            kind: entry.kind,
+            title: entry.title,
+            payload: toJsonInput(entry.payload),
+            expiresAt: new Date(entry.expiresAt),
+            restoredAt: entry.restoredAt ? new Date(entry.restoredAt) : null,
+            createdAt: new Date(entry.createdAt),
+            updatedAt: new Date(entry.updatedAt)
           }))
         });
       }
@@ -428,7 +544,10 @@ export async function POST(request: NextRequest) {
         planItems: parsed.data.planItems.length,
         tags: parsed.data.tags.length,
         progressEntries: parsed.data.progressEntries.length,
-        noteEntries: parsed.data.noteEntries.length
+        noteEntries: parsed.data.noteEntries.length,
+        progressEntryTags: parsed.data.progressEntryTags.length,
+        manualActualGroupTags: parsed.data.manualActualGroupTags.length,
+        trashEntries: parsed.data.trashEntries.length
       }
     });
   } catch (error) {
@@ -442,6 +561,10 @@ export async function POST(request: NextRequest) {
 
     if (error instanceof z.ZodError) {
       return NextResponse.json({ error: "备份文件格式不正确。" }, { status: 400 });
+    }
+
+    if (error instanceof Error && error.message.includes("引用了不存在的记录")) {
+      return NextResponse.json({ error: error.message }, { status: 400 });
     }
 
     const message = error instanceof Error ? error.message : "导入失败。";
