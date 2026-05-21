@@ -299,7 +299,8 @@ textarea {
 }
 
 .settings-trigger:hover,
-.more-menu[open] .settings-trigger {
+.more-menu[open] .settings-trigger,
+.more-menu.is-open .settings-trigger {
   background: rgba(50, 76, 85, 0.1);
 }
 
@@ -970,7 +971,8 @@ textarea {
 
 .notes-panel .note-add-row {
   flex: 0 0 auto;
-  margin-top: 8px;
+  margin-top: 0;
+  margin-bottom: 8px;
 }
 
 .plan-row,
@@ -1056,6 +1058,17 @@ textarea {
   min-height: 24px;
   padding: 4px 10px;
   line-height: 1.18;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-overflow: clip;
+}
+
+.today-plan-source-chip {
+  max-width: 100%;
+  min-height: 28px;
+  padding: 5px 12px;
+  font-size: 0.84rem;
+  line-height: 1.2;
   white-space: normal;
   overflow-wrap: anywhere;
   text-overflow: clip;
@@ -1688,7 +1701,8 @@ textarea {
   z-index: 2;
 }
 
-.more-menu[open] {
+.more-menu[open],
+.more-menu.is-open {
   z-index: var(--z-menu-open);
 }
 
@@ -1714,7 +1728,8 @@ textarea {
 }
 
 .more-trigger:hover,
-.more-menu[open] .more-trigger {
+.more-menu[open] .more-trigger,
+.more-menu.is-open .more-trigger {
   background: rgba(50, 76, 85, 0.08);
 }
 
@@ -1738,13 +1753,24 @@ textarea {
   box-shadow: 0 12px 30px rgba(65, 47, 25, 0.14);
 }
 
+.menu-popover-floating {
+  position: fixed;
+  right: auto;
+  z-index: calc(var(--z-menu-open) + 20);
+}
+
 .panel:has(.more-menu[open]),
+.panel:has(.more-menu.is-open),
 .panel:has(.tag-suggestion-popover),
 .plan-row:has(.more-menu[open]),
+.plan-row:has(.more-menu.is-open),
 .plan-row:has(.tag-suggestion-popover),
 .progress-row:has(.more-menu[open]),
+.progress-row:has(.more-menu.is-open),
 .actual-group:has(.more-menu[open]),
+.actual-group:has(.more-menu.is-open),
 .week-day-card:has(.more-menu[open]),
+.week-day-card:has(.more-menu.is-open),
 .week-note-card:has(.more-menu[open]) {
   z-index: var(--z-menu-open);
 }

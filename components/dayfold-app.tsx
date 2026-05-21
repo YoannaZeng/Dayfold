@@ -13,6 +13,7 @@ import {
   type ReactNode,
   type SetStateAction
 } from "react";
+import { createPortal } from "react-dom";
 
 import type { DayfoldSnapshot } from "@/lib/api-types";
 import {
@@ -1122,6 +1123,29 @@ function NoteListEditor({
 
   return (
     <div className={`note-list${compact ? " is-compact" : ""}`}>
+      {allowCreate ? (
+        <div className="note-add-row">
+          <span className="note-bullet" aria-hidden="true">
+            •
+          </span>
+          <input
+            className="note-item-input"
+            value={draft}
+            placeholder={addPlaceholder}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
+                event.preventDefault();
+                void handleAddItem();
+              }
+            }}
+          />
+          <button className="button button-secondary button-small" type="button" onClick={() => void handleAddItem()}>
+            Add
+          </button>
+        </div>
+      ) : null}
+
       {items.length ? (
         <div className="note-list-items">
           {items.map((item, index) => (
@@ -1182,29 +1206,6 @@ function NoteListEditor({
       ) : hideEmptyState ? null : (
         <div className="note-list-empty muted-copy">{placeholder}</div>
       )}
-
-      {allowCreate ? (
-        <div className="note-add-row">
-          <span className="note-bullet" aria-hidden="true">
-            •
-          </span>
-          <input
-            className="note-item-input"
-            value={draft}
-            placeholder={addPlaceholder}
-            onChange={(event) => setDraft(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.nativeEvent.isComposing) {
-                event.preventDefault();
-                void handleAddItem();
-              }
-            }}
-          />
-          <button className="button button-secondary button-small" type="button" onClick={() => void handleAddItem()}>
-            Add
-          </button>
-        </div>
-      ) : null}
     </div>
   );
 }
@@ -1220,13 +1221,38 @@ function MoreMenu({
   triggerClassName?: string;
   menuClassName?: string;
 }) {
-  const ref = useRef<HTMLDetailsElement | null>(null);
+  const ref = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const menuRef = useRef<HTMLDivElement | null>(null);
+  const [open, setOpen] = useState(false);
+  const [menuPosition, setMenuPosition] = useState({ top: 0, left: 0 });
+
+  function updateMenuPosition() {
+    const triggerRect = triggerRef.current?.getBoundingClientRect();
+    if (!triggerRect) return;
+
+    const gap = 8;
+    const viewportPadding = 8;
+    const menuWidth = menuRef.current?.offsetWidth ?? (menuClassName.includes("settings-popover") ? 150 : 150);
+    const menuHeight = menuRef.current?.offsetHeight ?? items.length * 38 + 12;
+    const shouldOpenUp =
+      window.innerHeight - triggerRect.bottom < menuHeight + gap + viewportPadding &&
+      triggerRect.top > window.innerHeight - triggerRect.bottom;
+    const rawTop = shouldOpenUp ? triggerRect.top - menuHeight - gap : triggerRect.bottom + gap;
+    const rawLeft = triggerRect.right - menuWidth;
+
+    setMenuPosition({
+      top: Math.min(Math.max(viewportPadding, rawTop), window.innerHeight - menuHeight - viewportPadding),
+      left: Math.min(Math.max(viewportPadding, rawLeft), window.innerWidth - menuWidth - viewportPadding)
+    });
+  }
 
   useEffect(() => {
     function handleClick(event: MouseEvent) {
-      if (!ref.current) return;
-      if (!ref.current.contains(event.target as Node)) {
-        ref.current.open = false;
+      const target = event.target as Node;
+      if (!ref.current || !menuRef.current) return;
+      if (!ref.current.contains(target) && !menuRef.current.contains(target)) {
+        setOpen(false);
       }
     }
 
@@ -1234,9 +1260,48 @@ function MoreMenu({
     return () => window.removeEventListener("click", handleClick);
   }, []);
 
+  useEffect(() => {
+    if (!open) return;
+
+    updateMenuPosition();
+
+    function handleViewportChange() {
+      updateMenuPosition();
+    }
+
+    function handleKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        setOpen(false);
+      }
+    }
+
+    window.addEventListener("resize", handleViewportChange);
+    window.addEventListener("scroll", handleViewportChange, true);
+    window.addEventListener("keydown", handleKeyDown);
+
+    return () => {
+      window.removeEventListener("resize", handleViewportChange);
+      window.removeEventListener("scroll", handleViewportChange, true);
+      window.removeEventListener("keydown", handleKeyDown);
+    };
+  }, [open, items.length, menuClassName]);
+
   return (
-    <details className="more-menu" ref={ref}>
-      <summary className={triggerClassName}>
+    <div className={`more-menu${open ? " is-open" : ""}`} ref={ref}>
+      <button
+        className={triggerClassName}
+        type="button"
+        ref={triggerRef}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        onClick={(event) => {
+          event.stopPropagation();
+          if (!open) {
+            updateMenuPosition();
+          }
+          setOpen((current) => !current);
+        }}
+      >
         {trigger ?? (
           <>
             <span className="more-dot" />
@@ -1244,24 +1309,34 @@ function MoreMenu({
             <span className="more-dot" />
           </>
         )}
-      </summary>
-      <div className={menuClassName}>
-        {items.map((item) => (
-          <button
-            key={item.label}
-            className={`menu-item${item.tone === "danger" ? " is-danger" : ""}`}
-            type="button"
-            onClick={async (event) => {
-              event.preventDefault();
-              ref.current?.removeAttribute("open");
-              await item.onClick();
-            }}
-          >
-            {item.label}
-          </button>
-        ))}
-      </div>
-    </details>
+      </button>
+      {open
+        ? createPortal(
+            <div
+              className={`${menuClassName} menu-popover-floating`}
+              ref={menuRef}
+              role="menu"
+              style={{ top: menuPosition.top, left: menuPosition.left }}
+            >
+              {items.map((item) => (
+                <button
+                  key={item.label}
+                  className={`menu-item${item.tone === "danger" ? " is-danger" : ""}`}
+                  type="button"
+                  role="menuitem"
+                  onClick={async () => {
+                    setOpen(false);
+                    await item.onClick();
+                  }}
+                >
+                  {item.label}
+                </button>
+              ))}
+            </div>,
+            document.body
+          )
+        : null}
+    </div>
   );
 }
 
@@ -1835,6 +1910,11 @@ export function DayfoldApp({
   }
 
   async function exportBackup() {
+    const confirmed = window.confirm("导出会下载当前账号的计划、进展、实际、笔记、复盘和标签备份。确认导出吗？");
+    if (!confirmed) {
+      return;
+    }
+
     setExporting(true);
 
     try {
@@ -4060,7 +4140,7 @@ export function DayfoldApp({
                 <span className="field-label-text">来自项目</span>
               </div>
               <div className="context-line progress-context-line">
-                <span className="plan-source-chip">{todayPlanDraft.sourceTitle}</span>
+                <span className="plan-source-chip today-plan-source-chip">{todayPlanDraft.sourceTitle}</span>
               </div>
             </div>
             <input
