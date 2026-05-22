@@ -1292,6 +1292,7 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
   const visibleItems = [...dayItems, ...weekItems, ...monthItems];
   const visibleItemIds = visibleItems.map((item) => item.id);
   const visibleSourceItemIds = Array.from(new Set(dayItems.map((item) => item.sourceItemId ?? "").filter(Boolean)));
+  const stateItemIds = Array.from(new Set([...visibleItemIds, ...visibleSourceItemIds]));
   const stateHistory = await db.planItemDayState.findMany({
     where: {
       userId: user.id,
@@ -1303,7 +1304,7 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
       OR: [
         {
           planItemId: {
-            in: visibleItemIds
+            in: stateItemIds
           }
         },
         {
@@ -1328,15 +1329,26 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
     orderBy: [{ day: { date: "asc" } }, { updatedAt: "asc" }]
   });
   const latestCompletionByKey = new Map<string, { completed: boolean; completedAt: string | null; dateKey: string }>();
-  stateHistory.forEach((entry) => {
-    const sourceItemId = entry.planItem.sourceItemId;
-    const key = sourceItemId && visibleSourceItemIds.includes(sourceItemId) ? `source:${sourceItemId}` : `item:${entry.planItemId}`;
+  function setLatestCompletion(key: string, entry: (typeof stateHistory)[number]) {
     const dateKey = toDateKey(entry.day.date);
     latestCompletionByKey.set(key, {
       completed: entry.completed,
       completedAt: entry.completed && dateKey === toDateKey(day.date) ? entry.updatedAt.toISOString() : null,
       dateKey
     });
+  }
+
+  stateHistory.forEach((entry) => {
+    const sourceItemId = entry.planItem.sourceItemId;
+    if (visibleItemIds.includes(entry.planItemId)) {
+      setLatestCompletion(`item:${entry.planItemId}`, entry);
+    }
+    if (visibleSourceItemIds.includes(entry.planItemId)) {
+      setLatestCompletion(`source:${entry.planItemId}`, entry);
+    }
+    if (sourceItemId && visibleSourceItemIds.includes(sourceItemId)) {
+      setLatestCompletion(`source:${sourceItemId}`, entry);
+    }
   });
   const completionMap = new Map(
     visibleItems.map((item) => {
