@@ -340,7 +340,7 @@ export function buildActualGroups(day: DayState): ActualGroup[] {
   day.planSections.forEach((section) => {
     section.items.forEach((item) => {
       const groupId = item.isDerivedTodayPlan && item.sourceItemId ? item.sourceItemId : item.id;
-      if (!item.completed || linked.has(groupId)) {
+      if (!item.completed || !item.completedAt || linked.has(groupId)) {
         return;
       }
 

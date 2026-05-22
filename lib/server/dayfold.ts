@@ -1172,7 +1172,7 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
   const week = await ensureWeek(user.id, getWeekStart(date));
   const monthStart = getMonthStart(date);
 
-  const [sections, dayItems, weekItems, monthItems, dayStates, progressEntries, manualGroups] = await Promise.all([
+  const [sections, dayItems, weekItems, monthItems, progressEntries, manualGroups] = await Promise.all([
     db.planSection.findMany({
       where: {
         userId: user.id,
@@ -1242,12 +1242,6 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
       },
       orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }]
     }),
-    db.planItemDayState.findMany({
-      where: {
-        userId: user.id,
-        dayId: day.id
-      }
-    }),
     db.progressEntry.findMany({
       where: {
         userId: user.id,
@@ -1295,14 +1289,67 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
     })
   ]);
 
-  const completionMap = new Map(
-    dayStates.map((entry) => [
-      entry.planItemId,
-      {
-        completed: entry.completed,
-        completedAt: entry.completed ? entry.updatedAt.toISOString() : null
+  const visibleItems = [...dayItems, ...weekItems, ...monthItems];
+  const visibleItemIds = visibleItems.map((item) => item.id);
+  const visibleSourceItemIds = Array.from(new Set(dayItems.map((item) => item.sourceItemId ?? "").filter(Boolean)));
+  const stateHistory = await db.planItemDayState.findMany({
+    where: {
+      userId: user.id,
+      day: {
+        date: {
+          lte: day.date
+        }
+      },
+      OR: [
+        {
+          planItemId: {
+            in: visibleItemIds
+          }
+        },
+        {
+          planItem: {
+            userId: user.id,
+            scope: PlanItemScope.DAY,
+            sourceItemId: {
+              in: visibleSourceItemIds
+            }
+          }
+        }
+      ]
+    },
+    include: {
+      day: true,
+      planItem: {
+        select: {
+          sourceItemId: true
+        }
       }
-    ])
+    },
+    orderBy: [{ day: { date: "asc" } }, { updatedAt: "asc" }]
+  });
+  const latestCompletionByKey = new Map<string, { completed: boolean; completedAt: string | null; dateKey: string }>();
+  stateHistory.forEach((entry) => {
+    const sourceItemId = entry.planItem.sourceItemId;
+    const key = sourceItemId && visibleSourceItemIds.includes(sourceItemId) ? `source:${sourceItemId}` : `item:${entry.planItemId}`;
+    const dateKey = toDateKey(entry.day.date);
+    latestCompletionByKey.set(key, {
+      completed: entry.completed,
+      completedAt: entry.completed && dateKey === toDateKey(day.date) ? entry.updatedAt.toISOString() : null,
+      dateKey
+    });
+  });
+  const completionMap = new Map(
+    visibleItems.map((item) => {
+      const key = item.sourceItemId ? `source:${item.sourceItemId}` : `item:${item.id}`;
+      const completion = latestCompletionByKey.get(key);
+      return [
+        item.id,
+        {
+          completed: completion?.completed ?? false,
+          completedAt: completion?.completedAt ?? null
+        }
+      ];
+    })
   );
   const todaySection = sections.find((section) => section.kind === SectionKind.TODAY);
   const weekSection = sections.find((section) => section.kind === SectionKind.WEEK);
@@ -1694,9 +1741,8 @@ export async function togglePlanItemMutation(params: {
   planItemId: string;
 }) {
   const user = params.user;
-  const selectedDate = fromDateKey(params.selectedDateKey);
-  const day = await ensureDay(user.id, selectedDate);
-  const planItem = await getPlanItemOrThrow(user.id, params.planItemId);
+  const day = await ensureDay(user.id, fromDateKey(params.selectedDateKey));
+  await getPlanItemOrThrow(user.id, params.planItemId);
   const existing = await db.planItemDayState.findUnique({
     where: {
       planItemId_dayId: {
@@ -1708,71 +1754,23 @@ export async function togglePlanItemMutation(params: {
 
   const nextCompleted = !(existing?.completed ?? false);
 
-  let targetItemIds = [params.planItemId];
-  let targetDateKeys = [params.selectedDateKey];
-
-  if (planItem.scope === PlanItemScope.WEEK) {
-    targetDateKeys = getWeekDateKeys(selectedDate).filter((dateKey) => dateKey >= params.selectedDateKey);
-  } else if (planItem.scope === PlanItemScope.MONTH) {
-    targetDateKeys = getMonthDateKeys(selectedDate).filter((dateKey) => dateKey >= params.selectedDateKey);
-  } else if (planItem.scope === PlanItemScope.DAY && planItem.sourceItemId) {
-    const futureDerivedItems = await db.planItem.findMany({
-      where: {
-        userId: user.id,
-        scope: PlanItemScope.DAY,
-        sourceItemId: planItem.sourceItemId,
-        section: {
-          day: {
-            date: {
-              gte: selectedDate
-            }
-          }
-        }
-      },
-      select: {
-        id: true,
-        section: {
-          select: {
-            day: {
-              select: {
-                date: true
-              }
-            }
-          }
-        }
+  await db.planItemDayState.upsert({
+    where: {
+      planItemId_dayId: {
+        planItemId: params.planItemId,
+        dayId: day.id
       }
-    });
-
-    targetItemIds = futureDerivedItems.map((item) => item.id);
-    targetDateKeys = futureDerivedItems.map((item) => toDateKey(item.section!.day.date));
-  }
-
-  const targetDays = await Promise.all(targetDateKeys.map((dateKey) => ensureDay(user.id, fromDateKey(dateKey))));
-
-  await db.$transaction(
-    targetDays.flatMap((targetDay, index) => {
-      const targetPlanItemId = planItem.scope === PlanItemScope.DAY && planItem.sourceItemId ? targetItemIds[index] : params.planItemId;
-      if (!targetPlanItemId) return [];
-
-      return db.planItemDayState.upsert({
-        where: {
-          planItemId_dayId: {
-            planItemId: targetPlanItemId,
-            dayId: targetDay.id
-          }
-        },
-        update: {
-          completed: nextCompleted
-        },
-        create: {
-          userId: user.id,
-          planItemId: targetPlanItemId,
-          dayId: targetDay.id,
-          completed: nextCompleted
-        }
-      });
-    })
-  );
+    },
+    update: {
+      completed: nextCompleted
+    },
+    create: {
+      userId: user.id,
+      planItemId: params.planItemId,
+      dayId: day.id,
+      completed: nextCompleted
+    }
+  });
 }
 
 export async function renamePlanItemMutation(params: {
