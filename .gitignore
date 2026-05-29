@@ -8,6 +8,7 @@ tsconfig.tsbuildinfo
 # Environment variables (contains secrets!)
 .env
 .env.local
+.env.production
 .env.*.local
 
 # Logs

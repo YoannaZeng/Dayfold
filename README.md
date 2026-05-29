@@ -71,9 +71,9 @@ npm run dev:reset
 Production preflight:
 
 ```bash
-npm run prisma:generate
-./node_modules/.bin/prisma migrate deploy --schema prisma/schema.prisma
-npm run build
+npm run deploy:preflight
+npm run deploy:migrate
+npm run deploy:health
 ```
 
 Production env must include:
@@ -120,7 +120,9 @@ Phase 3 kickoff:
 Phase C deployment prep:
 
 - `npm run vercel-build` generates the Prisma client before `next build`.
-- `npm run verify:phaseC` runs the build/schema check and production env check together.
+- `npm run verify:phaseC` / `npm run deploy:preflight` runs the production env check, Prisma generate, schema validate, and build together.
 - `npm run verify:deploy-env` checks production-only environment variables before deployment.
+- `npm run deploy:migrate` applies production Prisma migrations and confirms migration status.
+- `npm run deploy:health` checks the deployed `/api/health` endpoint.
 - `/api/health` confirms the deployed app can reach PostgreSQL.
 - See `DEPLOYMENT.md` for the first public beta deployment checklist.

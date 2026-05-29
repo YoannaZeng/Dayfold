@@ -99,8 +99,6 @@ type TrashEntry = {
   expiresAt: string;
 };
 
-type UndoSnapshot = unknown;
-
 type SnapshotUpdater = (snapshot: DayfoldSnapshot) => DayfoldSnapshot;
 type CalendarWeek = string[];
 
@@ -1548,8 +1546,6 @@ export function DayfoldApp({
   const [weekActualView, setWeekActualView] = useState<"date" | "tag">("date");
   const [dayNoteEditing, setDayNoteEditing] = useState(false);
   const [weekReviewEditing, setWeekReviewEditing] = useState(false);
-  const [undoStack, setUndoStack] = useState<UndoSnapshot[]>([]);
-  const [undoing, setUndoing] = useState(false);
   const [betaSafetyOpen, setBetaSafetyOpen] = useState(false);
   const [tagManagerOpen, setTagManagerOpen] = useState(false);
   const [tagDraft, setTagDraft] = useState("");
@@ -1697,15 +1693,6 @@ export function DayfoldApp({
     setToast(nextToast);
   }
 
-  async function captureUndoSnapshot() {
-    const response = await fetch("/api/export", { method: "GET" });
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({ error: "无法创建撤回快照。" }));
-      throw new ApiError(payload.error ?? "无法创建撤回快照。", response.status);
-    }
-    return response.json();
-  }
-
   function handleAuthExpired(message = "登录已失效，正在返回登录页...") {
     if (authRedirectingRef.current) {
       return;
@@ -1770,7 +1757,7 @@ export function DayfoldApp({
   }, [selectedDateKey]);
 
   useEffect(() => {
-    function handleUndoShortcut(event: KeyboardEvent) {
+    function handleGlobalUndoShortcut(event: KeyboardEvent) {
       const isUndo = (event.ctrlKey || event.metaKey) && !event.shiftKey && event.key.toLowerCase() === "z";
       if (!isUndo) return;
 
@@ -1779,58 +1766,17 @@ export function DayfoldApp({
         activeElement instanceof HTMLInputElement ||
         activeElement instanceof HTMLTextAreaElement ||
         activeElement instanceof HTMLSelectElement ||
-        Boolean(activeElement?.getAttribute("contenteditable"));
+        (activeElement instanceof HTMLElement && activeElement.isContentEditable);
 
-      if (isEditingField || !undoStack.length || undoing) {
-        return;
+      if (!isEditingField) {
+        event.preventDefault();
+        event.stopPropagation();
       }
-
-      event.preventDefault();
-
-      const snapshotToRestore = undoStack[undoStack.length - 1];
-      setUndoing(true);
-      setStatusTone("neutral");
-      setStatusMessage("撤回中...");
-
-      void fetch("/api/import", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify(snapshotToRestore)
-      })
-        .then(async (response) => {
-          if (!response.ok) {
-            const body = await response.json().catch(() => ({ error: "撤回失败。" }));
-            throw new ApiError(body.error ?? "撤回失败。", response.status);
-          }
-
-          setUndoStack((current) => current.slice(0, -1));
-          await refresh(selectedDateKey);
-          markSaved("已撤回上一步");
-          showToast({
-            type: "success",
-            message: "已撤回上一步"
-          });
-        })
-        .catch((nextError) => {
-          const message = nextError instanceof Error ? nextError.message : "撤回失败。";
-          setError(message);
-          setStatusTone("error");
-          setStatusMessage("撤回失败");
-          showToast({
-            type: "error",
-            message
-          });
-        })
-        .finally(() => {
-          setUndoing(false);
-        });
     }
 
-    window.addEventListener("keydown", handleUndoShortcut);
-    return () => window.removeEventListener("keydown", handleUndoShortcut);
-  }, [selectedDateKey, undoStack, undoing]);
+    window.addEventListener("keydown", handleGlobalUndoShortcut, true);
+    return () => window.removeEventListener("keydown", handleGlobalUndoShortcut, true);
+  }, []);
 
   async function commit(
     payload: Record<string, unknown>,
@@ -1839,11 +1785,9 @@ export function DayfoldApp({
       errorMessage?: string;
       successToast?: boolean;
       optimisticUpdate?: SnapshotUpdater;
-      undoable?: boolean;
     }
   ) {
     let previousSnapshot: DayfoldSnapshot | null = null;
-    let undoSnapshot: UndoSnapshot | null = null;
 
     setError(null);
     setSavingCount((count) => count + 1);
@@ -1856,19 +1800,8 @@ export function DayfoldApp({
     }
 
     try {
-      if (options?.undoable !== false) {
-        try {
-          undoSnapshot = await captureUndoSnapshot();
-        } catch {
-          undoSnapshot = null;
-        }
-      }
-
       await mutate(payload);
       await refresh(selectedDateKey);
-      if (undoSnapshot) {
-        setUndoStack((current) => [...current.slice(-19), undoSnapshot]);
-      }
       markSaved(options?.successMessage ?? "已保存");
       if (options?.successToast) {
         showToast({
@@ -2036,7 +1969,6 @@ export function DayfoldApp({
         throw new ApiError(payload.error ?? "清空数据失败。", response.status);
       }
 
-      setUndoStack([]);
       await refresh(selectedDateKey);
       setBetaSafetyOpen(false);
       markSaved("数据已清空");
@@ -2075,8 +2007,7 @@ export function DayfoldApp({
       },
       {
         successMessage: "标签已添加",
-        successToast: true,
-        undoable: false
+        successToast: true
       }
     );
     setTagDraft("");
@@ -2099,8 +2030,7 @@ export function DayfoldApp({
       },
       {
         successMessage: "标签已更新",
-        successToast: true,
-        undoable: false
+        successToast: true
       }
     );
     setEditingTagId(null);
@@ -2119,8 +2049,7 @@ export function DayfoldApp({
       },
       {
         successMessage: "标签已删除",
-        successToast: true,
-        undoable: false
+        successToast: true
       }
     );
   }
@@ -2153,8 +2082,7 @@ export function DayfoldApp({
         },
         {
           successMessage: "已从回收站恢复",
-          successToast: true,
-          undoable: false
+          successToast: true
         }
       );
       setTrashEntries(await readTrashEntries());

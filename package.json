@@ -15,12 +15,15 @@
     "prisma:generate": "prisma generate --schema prisma/schema.prisma",
     "verify:phaseA": "npm run prisma:generate && prisma validate --schema prisma/schema.prisma && npm run build",
     "verify:phaseB": "node ./scripts/phaseB-auth-safety-check.mjs",
-    "verify:phaseC": "npm run verify:phaseA && npm run verify:deploy-env",
+    "verify:phaseC": "npm run deploy:preflight",
     "verify:deploy-env": "node ./scripts/verify-deploy-env.mjs",
     "verify:export-import-roundtrip": "node ./scripts/verify-export-import-roundtrip.mjs",
     "verify:quick": "node ./scripts/quick-smoke-check.mjs",
     "verify:smoke": "node ./scripts/phase1-smoke-check.mjs",
-    "verify:phase2": "node ./scripts/phase2-smoke-check.mjs"
+    "verify:phase2": "node ./scripts/phase2-smoke-check.mjs",
+    "deploy:preflight": "node ./scripts/run-production-preflight.mjs",
+    "deploy:migrate": "node ./scripts/run-production-migrations.mjs",
+    "deploy:health": "node ./scripts/verify-production-health.mjs"
   },
   "dependencies": {
     "@prisma/client": "^6.8.2",

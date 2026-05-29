@@ -25,47 +25,56 @@ Notes:
 - `DAYFOLD_SESSION_SECRET` must be stable. If it changes, existing sessions will be logged out.
 - `DAYFOLD_PUBLIC_ORIGIN` is used by the same-origin write guard. Use only the origin, without a trailing path.
 - Do not set `DAYFOLD_CLAIM_LEGACY_DEMO_USER` in production.
+- `.env.production.example` shows the required names, but real production values should live in the hosting provider or an ignored shell file.
+
+For a local production check with an ignored `.env.production` file:
+
+```bash
+set -a
+source .env.production
+set +a
+```
 
 ## First Deploy Sequence
 
 1. Create a production PostgreSQL database.
 2. Set the three production environment variables above.
-3. Run the environment check locally or in CI with the production values available:
+3. Run the production preflight locally or in CI with the production values available:
 
 ```bash
-NODE_ENV=production npm run verify:deploy-env
+npm run deploy:preflight
 ```
 
-4. Run the full Phase C preflight with production values available:
+4. Apply database migrations to the production database:
 
 ```bash
-NODE_ENV=production npm run verify:phaseC
+npm run deploy:migrate
 ```
 
-5. Apply database migrations to the production database:
+This command first reruns the production env check, then runs `prisma migrate deploy`, then confirms migration status. It never runs `migrate reset`.
 
-```bash
-./node_modules/.bin/prisma migrate deploy --schema prisma/schema.prisma
-```
-
-Before running this command, double-check that the active `DATABASE_URL` is the production database. Do not run `migrate reset` against production.
-
-6. Use this build command on Vercel:
+5. Use this build command on Vercel:
 
 ```bash
 npm run vercel-build
 ```
 
-7. After deploy, open:
+6. After deploy, run:
 
 ```bash
-https://your-production-domain.com/api/health
+npm run deploy:health
 ```
 
 Expected result:
 
 ```json
 { "ok": true, "service": "dayfold", "database": "reachable" }
+```
+
+You can override the checked URL with `DAYFOLD_HEALTH_URL` when the public origin is not the exact endpoint to test:
+
+```bash
+DAYFOLD_HEALTH_URL="https://your-production-domain.com/api/health" npm run deploy:health
 ```
 
 ## Public Beta Acceptance Checklist

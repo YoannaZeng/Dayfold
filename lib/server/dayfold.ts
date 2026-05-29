@@ -761,7 +761,40 @@ async function buildPlanItemTrashPayload(tx: Prisma.TransactionClient, userId: s
   };
 }
 
-async function restorePlanItemFromPayload(tx: Prisma.TransactionClient, userId: string, payload: Record<string, any>) {
+async function buildPlanItemCascadeTrashPayload(tx: Prisma.TransactionClient, userId: string, planItemId: string) {
+  const payload = await buildPlanItemTrashPayload(tx, userId, planItemId);
+
+  if (payload.item.sourceItemId) {
+    return payload;
+  }
+
+  const derivedItems = await tx.planItem.findMany({
+    where: {
+      userId,
+      sourceItemId: planItemId
+    },
+    select: {
+      id: true
+    },
+    orderBy: [{ displayOrder: "asc" }, { createdAt: "asc" }]
+  });
+
+  if (!derivedItems.length) {
+    return payload;
+  }
+
+  return {
+    ...payload,
+    derivedItems: await Promise.all(derivedItems.map((item) => buildPlanItemTrashPayload(tx, userId, item.id)))
+  };
+}
+
+async function restorePlanItemFromPayload(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  payload: Record<string, any>,
+  options: { restoreDerivedItems?: boolean } = {}
+) {
   const item = payload.item;
   if (!item?.id) throw new Error("回收站计划数据缺失。");
 
@@ -841,6 +874,15 @@ async function restorePlanItemFromPayload(tx: Prisma.TransactionClient, userId: 
       where: { userId, id: { in: noteEntryIds } },
       data: { planItemId: item.id }
     });
+  }
+
+  if (options.restoreDerivedItems === false) {
+    return;
+  }
+
+  const derivedItemPayloads = Array.isArray(payload.derivedItems) ? payload.derivedItems : [];
+  for (const derivedItemPayload of derivedItemPayloads) {
+    await restorePlanItemFromPayload(tx, userId, derivedItemPayload, { restoreDerivedItems: false });
   }
 }
 
@@ -1997,23 +2039,14 @@ export async function renamePlanItemMutation(params: {
 export async function deletePlanItemMutation(params: { user: User; planItemId: string }) {
   const user = params.user;
   await db.$transaction(async (tx) => {
-    const payload = await buildPlanItemTrashPayload(tx, user.id, params.planItemId);
+    const payload = await buildPlanItemCascadeTrashPayload(tx, user.id, params.planItemId);
     await createTrashEntry(tx, {
       userId: user.id,
       kind: "plan-item",
       title: payload.item.title,
       payload
     });
-    const item = await tx.planItem.findFirst({
-      where: {
-        id: params.planItemId,
-        userId: user.id
-      },
-      select: {
-        sourceItemId: true
-      }
-    });
-    const shouldDeleteCopies = !item?.sourceItemId;
+    const shouldDeleteCopies = !payload.item.sourceItemId;
     await tx.planItem.deleteMany({
       where: {
         userId: user.id,

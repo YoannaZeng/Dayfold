@@ -366,6 +366,7 @@ function remapTrashPayload(
     const dayStates = Array.isArray(payload.dayStates) ? payload.dayStates : [];
     const progressEntries = Array.isArray(payload.progressEntries) ? payload.progressEntries : [];
     const noteEntryIds = Array.isArray(payload.noteEntryIds) ? payload.noteEntryIds : [];
+    const derivedItems = Array.isArray(payload.derivedItems) ? payload.derivedItems : [];
 
     if (!item?.id) {
       throw new Error("TrashEntry.plan-item payload 缺失必要字段。");
@@ -416,6 +417,9 @@ function remapTrashPayload(
       }),
       noteEntryIds: noteEntryIds.map((noteEntryId) =>
         requireMappedId("Trash plan item noteEntryId", idMaps.noteEntry, String(noteEntryId))
+      ),
+      derivedItems: derivedItems.map((derivedItem) =>
+        remapTrashPayload("plan-item", derivedItem as Record<string, unknown>, idMaps, trashIdMaps)
       )
     };
   }
