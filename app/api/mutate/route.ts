@@ -13,6 +13,7 @@ import {
   createPlanItemMutation,
   createProgressEntryMutation,
   deleteTagMutation,
+  dismissActualEntryMutation,
   deleteManualActualGroupMutation,
   deleteManualActualItemMutation,
   deletePlanItemMutation,
@@ -202,6 +203,13 @@ const updateManualItemSchema = baseSchema.extend({
 const deleteManualItemSchema = baseSchema.extend({
   action: z.literal("delete-manual-actual-item"),
   itemId: z.string()
+});
+
+const dismissActualEntrySchema = baseSchema.extend({
+  action: z.literal("dismiss-actual-entry"),
+  targetType: z.enum(["group", "item"]),
+  groupKind: z.enum(["linked", "manual", "free"]),
+  targetId: z.string()
 });
 
 const restoreTrashEntrySchema = baseSchema.extend({
@@ -394,6 +402,11 @@ export async function POST(request: NextRequest) {
       case "delete-manual-actual-item": {
         const parsed = deleteManualItemSchema.parse(body);
         await deleteManualActualItemMutation({ user, ...parsed });
+        break;
+      }
+      case "dismiss-actual-entry": {
+        const parsed = dismissActualEntrySchema.parse(body);
+        await dismissActualEntryMutation({ user, ...parsed });
         break;
       }
       case "restore-trash-entry": {

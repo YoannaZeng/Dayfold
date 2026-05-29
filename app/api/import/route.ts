@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { NextRequest, NextResponse } from "next/server";
 import { z } from "zod";
 
@@ -5,7 +6,7 @@ import { AuthError, requireCurrentUser } from "@/lib/server/auth";
 import { NoteEntryKind, type Prisma } from "@/generated/prisma";
 import { db } from "@/lib/db";
 import { fromDateKey } from "@/lib/dates";
-import { parseNoteEntries } from "@/lib/note-entries";
+import { parseNoteEntries, serializeNoteEntries } from "@/lib/note-entries";
 import { assertSameOrigin, RequestGuardError } from "@/lib/server/request-guard";
 
 const daySchema = z.object({
@@ -180,38 +181,396 @@ const importSchema = z.object({
   })
 });
 
-function assertImportedReference(
-  label: string,
-  ids: Set<string>,
-  referencedId: string
-) {
-  if (!ids.has(referencedId)) {
-    throw new Error(`${label} 引用了不存在的记录：${referencedId}`);
-  }
+type ImportData = z.infer<typeof importSchema>["data"];
+type IdMap = Map<string, string>;
+type ImportIdMaps = {
+  day: IdMap;
+  week: IdMap;
+  planSection: IdMap;
+  planItem: IdMap;
+  tag: IdMap;
+  planItemTag: IdMap;
+  planItemDayState: IdMap;
+  progressEntry: IdMap;
+  progressEntryTag: IdMap;
+  noteEntry: IdMap;
+  manualActualGroup: IdMap;
+  manualActualGroupTag: IdMap;
+  manualActualItem: IdMap;
+  trashEntry: IdMap;
+};
+type TrashPayloadIdMaps = {
+  planSection: IdMap;
+  planItem: IdMap;
+  planItemDayState: IdMap;
+  progressEntry: IdMap;
+  manualActualGroup: IdMap;
+  manualActualItem: IdMap;
+};
+
+function createIdMap<T extends { id: string }>(entries: T[]) {
+  return new Map(entries.map((entry) => [entry.id, randomUUID()]));
 }
 
-function validateImportCompleteness(data: z.infer<typeof importSchema>["data"]) {
-  const tagIds = new Set(data.tags.map((entry) => entry.id));
-  const progressEntryIds = new Set(data.progressEntries.map((entry) => entry.id));
-  const manualActualGroupIds = new Set(data.manualActualGroups.map((entry) => entry.id));
+function requireMappedId(label: string, map: IdMap, referencedId: string) {
+  const mappedId = map.get(referencedId);
 
-  data.progressEntryTags.forEach((entry) => {
-    assertImportedReference("ProgressEntryTag.progressEntryId", progressEntryIds, entry.progressEntryId);
-    assertImportedReference("ProgressEntryTag.tagId", tagIds, entry.tagId);
-  });
+  if (!mappedId) {
+    throw new Error(`${label} 引用了不存在的记录：${referencedId}`);
+  }
 
-  data.manualActualGroupTags.forEach((entry) => {
-    assertImportedReference(
-      "ManualActualGroupTag.manualActualGroupId",
-      manualActualGroupIds,
-      entry.manualActualGroupId
-    );
-    assertImportedReference("ManualActualGroupTag.tagId", tagIds, entry.tagId);
-  });
+  return mappedId;
+}
+
+function optionalMappedId(label: string, map: IdMap, referencedId: string | null) {
+  return referencedId ? requireMappedId(label, map, referencedId) : null;
+}
+
+function getOrCreateMappedId(map: IdMap, referencedId: string) {
+  const existing = map.get(referencedId);
+
+  if (existing) {
+    return existing;
+  }
+
+  const nextId = randomUUID();
+  map.set(referencedId, nextId);
+  return nextId;
+}
+
+function resolveMappedOrTrashId(
+  label: string,
+  activeMap: IdMap,
+  trashMap: IdMap,
+  referencedId: string
+) {
+  return activeMap.get(referencedId) ?? getOrCreateMappedId(trashMap, referencedId);
+}
+
+function createImportIdMaps(data: ImportData): ImportIdMaps {
+  return {
+    day: createIdMap(data.days),
+    week: createIdMap(data.weeks),
+    planSection: createIdMap(data.planSections),
+    planItem: createIdMap(data.planItems),
+    tag: createIdMap(data.tags),
+    planItemTag: createIdMap(data.planItemTags),
+    planItemDayState: createIdMap(data.planItemDayStates),
+    progressEntry: createIdMap(data.progressEntries),
+    progressEntryTag: createIdMap(data.progressEntryTags),
+    noteEntry: createIdMap(data.noteEntries),
+    manualActualGroup: createIdMap(data.manualActualGroups),
+    manualActualGroupTag: createIdMap(data.manualActualGroupTags),
+    manualActualItem: createIdMap(data.manualActualItems),
+    trashEntry: createIdMap(data.trashEntries)
+  };
 }
 
 function toJsonInput(value: Record<string, unknown>): Prisma.InputJsonValue {
   return JSON.parse(JSON.stringify(value)) as Prisma.InputJsonValue;
+}
+
+function remapSerializedNoteContent(serializedContent: string, planItemIdMap: IdMap) {
+  return serializeNoteEntries(
+    parseNoteEntries(serializedContent).map((entry) =>
+      entry.kind === "project"
+        ? {
+            ...entry,
+            projectId: entry.projectId ? planItemIdMap.get(entry.projectId) ?? null : null
+          }
+        : entry
+    )
+  );
+}
+
+function remapTrashPayload(
+  kind: string,
+  payload: Record<string, unknown>,
+  idMaps: ImportIdMaps,
+  trashIdMaps: TrashPayloadIdMaps
+): Record<string, unknown> {
+  if (kind === "progress-entry") {
+    const entry = payload.entry as Record<string, unknown> | undefined;
+
+    if (!entry?.id || !entry.dayId) {
+      throw new Error("TrashEntry.progress-entry payload 缺失必要字段。");
+    }
+
+    return {
+      ...payload,
+      entry: {
+        ...entry,
+        id: getOrCreateMappedId(trashIdMaps.progressEntry, String(entry.id)),
+        dayId: requireMappedId("Trash progress entry dayId", idMaps.day, String(entry.dayId)),
+        planItemId: entry.planItemId
+          ? resolveMappedOrTrashId("Trash progress entry planItemId", idMaps.planItem, trashIdMaps.planItem, String(entry.planItemId))
+          : null
+      }
+    };
+  }
+
+  if (kind === "manual-actual-item") {
+    const item = payload.item as Record<string, unknown> | undefined;
+
+    if (!item?.id || !item.groupId) {
+      throw new Error("TrashEntry.manual-actual-item payload 缺失必要字段。");
+    }
+
+    return {
+      ...payload,
+      item: {
+        ...item,
+        id: getOrCreateMappedId(trashIdMaps.manualActualItem, String(item.id)),
+        groupId: resolveMappedOrTrashId(
+          "Trash manual actual item groupId",
+          idMaps.manualActualGroup,
+          trashIdMaps.manualActualGroup,
+          String(item.groupId)
+        )
+      }
+    };
+  }
+
+  if (kind === "manual-actual-group") {
+    const group = payload.group as Record<string, unknown> | undefined;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+
+    if (!group?.id || !group.dayId) {
+      throw new Error("TrashEntry.manual-actual-group payload 缺失必要字段。");
+    }
+
+    return {
+      ...payload,
+      group: {
+        ...group,
+        id: getOrCreateMappedId(trashIdMaps.manualActualGroup, String(group.id)),
+        dayId: requireMappedId("Trash manual actual group dayId", idMaps.day, String(group.dayId))
+      },
+      items: items.map((item) => {
+        const value = item as Record<string, unknown>;
+
+        if (!value.id) {
+          throw new Error("TrashEntry.manual-actual-group item 缺失 id。");
+        }
+
+        return {
+          ...value,
+          id: getOrCreateMappedId(trashIdMaps.manualActualItem, String(value.id))
+        };
+      })
+    };
+  }
+
+  if (kind === "plan-item") {
+    const item = payload.item as Record<string, unknown> | undefined;
+    const dayStates = Array.isArray(payload.dayStates) ? payload.dayStates : [];
+    const progressEntries = Array.isArray(payload.progressEntries) ? payload.progressEntries : [];
+    const noteEntryIds = Array.isArray(payload.noteEntryIds) ? payload.noteEntryIds : [];
+
+    if (!item?.id) {
+      throw new Error("TrashEntry.plan-item payload 缺失必要字段。");
+    }
+
+    return {
+      ...payload,
+      item: {
+        ...item,
+        id: getOrCreateMappedId(trashIdMaps.planItem, String(item.id)),
+        sectionId: item.sectionId
+          ? resolveMappedOrTrashId("Trash plan item sectionId", idMaps.planSection, trashIdMaps.planSection, String(item.sectionId))
+          : null,
+        weekId: item.weekId ? requireMappedId("Trash plan item weekId", idMaps.week, String(item.weekId)) : null,
+        sourceItemId: item.sourceItemId
+          ? resolveMappedOrTrashId("Trash plan item sourceItemId", idMaps.planItem, trashIdMaps.planItem, String(item.sourceItemId))
+          : null
+      },
+      dayStates: dayStates.map((state) => {
+        const value = state as Record<string, unknown>;
+
+        if (!value.id || !value.dayId) {
+          throw new Error("TrashEntry.plan-item dayState 缺失必要字段。");
+        }
+
+        return {
+          ...value,
+          id: getOrCreateMappedId(trashIdMaps.planItemDayState, String(value.id)),
+          dayId: requireMappedId("Trash plan item dayState.dayId", idMaps.day, String(value.dayId))
+        };
+      }),
+      progressEntries: progressEntries.map((progress) => {
+        const value = progress as Record<string, unknown>;
+        const entry = value.entry as Record<string, unknown> | undefined;
+
+        if (!entry?.id || !entry.dayId) {
+          throw new Error("TrashEntry.plan-item progress entry 缺失必要字段。");
+        }
+
+        return {
+          ...value,
+          entry: {
+            ...entry,
+            id: getOrCreateMappedId(trashIdMaps.progressEntry, String(entry.id)),
+            dayId: requireMappedId("Trash plan item progress entry dayId", idMaps.day, String(entry.dayId))
+          }
+        };
+      }),
+      noteEntryIds: noteEntryIds.map((noteEntryId) =>
+        requireMappedId("Trash plan item noteEntryId", idMaps.noteEntry, String(noteEntryId))
+      )
+    };
+  }
+
+  if (kind === "section") {
+    const section = payload.section as Record<string, unknown> | undefined;
+    const items = Array.isArray(payload.items) ? payload.items : [];
+
+    if (!section?.id || !section.dayId) {
+      throw new Error("TrashEntry.section payload 缺失必要字段。");
+    }
+
+    return {
+      ...payload,
+      section: {
+        ...section,
+        id: getOrCreateMappedId(trashIdMaps.planSection, String(section.id)),
+        dayId: requireMappedId("Trash section dayId", idMaps.day, String(section.dayId))
+      },
+      items: items.map((item) => remapTrashPayload("plan-item", item as Record<string, unknown>, idMaps, trashIdMaps))
+    };
+  }
+
+  if (kind === "day-note-entry") {
+    return {
+      ...payload,
+      dayId: payload.dayId ? requireMappedId("Trash day note dayId", idMaps.day, String(payload.dayId)) : payload.dayId,
+      entry:
+        payload.entry && typeof payload.entry === "object" && !Array.isArray(payload.entry)
+          ? (() => {
+              const entry = payload.entry as Record<string, unknown>;
+
+              if (entry.projectId) {
+                return {
+                  ...entry,
+                  projectId: resolveMappedOrTrashId(
+                    "Trash day note projectId",
+                    idMaps.planItem,
+                    trashIdMaps.planItem,
+                    String(entry.projectId)
+                  )
+                };
+              }
+
+              return entry;
+            })()
+          : payload.entry
+    };
+  }
+
+  return payload;
+}
+
+function remapImportData(data: ImportData): ImportData {
+  const idMaps = createImportIdMaps(data);
+  const trashIdMaps: TrashPayloadIdMaps = {
+    planSection: new Map(),
+    planItem: new Map(),
+    planItemDayState: new Map(),
+    progressEntry: new Map(),
+    manualActualGroup: new Map(),
+    manualActualItem: new Map()
+  };
+
+  return {
+    days: data.days.map((day) => ({
+      ...day,
+      id: idMaps.day.get(day.id)!,
+      note: remapSerializedNoteContent(day.note, idMaps.planItem)
+    })),
+    weeks: data.weeks.map((week) => ({
+      ...week,
+      id: idMaps.week.get(week.id)!
+    })),
+    planSections: data.planSections.map((section) => ({
+      ...section,
+      id: idMaps.planSection.get(section.id)!,
+      dayId: requireMappedId("PlanSection.dayId", idMaps.day, section.dayId)
+    })),
+    planItems: data.planItems.map((item) => ({
+      ...item,
+      id: idMaps.planItem.get(item.id)!,
+      sectionId: optionalMappedId("PlanItem.sectionId", idMaps.planSection, item.sectionId),
+      weekId: optionalMappedId("PlanItem.weekId", idMaps.week, item.weekId),
+      sourceItemId: optionalMappedId("PlanItem.sourceItemId", idMaps.planItem, item.sourceItemId)
+    })),
+    tags: data.tags.map((tag) => ({
+      ...tag,
+      id: idMaps.tag.get(tag.id)!
+    })),
+    planItemTags: data.planItemTags.map((entry) => ({
+      ...entry,
+      id: idMaps.planItemTag.get(entry.id)!,
+      planItemId: requireMappedId("PlanItemTag.planItemId", idMaps.planItem, entry.planItemId),
+      tagId: requireMappedId("PlanItemTag.tagId", idMaps.tag, entry.tagId)
+    })),
+    planItemDayStates: data.planItemDayStates.map((entry) => ({
+      ...entry,
+      id: idMaps.planItemDayState.get(entry.id)!,
+      planItemId: requireMappedId("PlanItemDayState.planItemId", idMaps.planItem, entry.planItemId),
+      dayId: requireMappedId("PlanItemDayState.dayId", idMaps.day, entry.dayId)
+    })),
+    progressEntries: data.progressEntries.map((entry) =>
+      "source" in entry
+        ? {
+            ...entry,
+            id: idMaps.progressEntry.get(entry.id)!,
+            dayId: requireMappedId("ProgressEntry.dayId", idMaps.day, entry.dayId),
+            planItemId: requireMappedId("ProgressEntry.planItemId", idMaps.planItem, entry.planItemId)
+          }
+        : {
+            ...entry,
+            id: idMaps.progressEntry.get(entry.id)!,
+            dayId: requireMappedId("ProgressEntry.dayId", idMaps.day, entry.dayId),
+            planItemId: optionalMappedId("ProgressEntry.planItemId", idMaps.planItem, entry.planItemId)
+          }
+    ),
+    progressEntryTags: data.progressEntryTags.map((entry) => ({
+      ...entry,
+      id: idMaps.progressEntryTag.get(entry.id)!,
+      progressEntryId: requireMappedId("ProgressEntryTag.progressEntryId", idMaps.progressEntry, entry.progressEntryId),
+      tagId: requireMappedId("ProgressEntryTag.tagId", idMaps.tag, entry.tagId)
+    })),
+    noteEntries: data.noteEntries.map((entry) => ({
+      ...entry,
+      id: idMaps.noteEntry.get(entry.id)!,
+      dayId: requireMappedId("NoteEntry.dayId", idMaps.day, entry.dayId),
+      planItemId: optionalMappedId("NoteEntry.planItemId", idMaps.planItem, entry.planItemId)
+    })),
+    manualActualGroups: data.manualActualGroups.map((group) => ({
+      ...group,
+      id: idMaps.manualActualGroup.get(group.id)!,
+      dayId: requireMappedId("ManualActualGroup.dayId", idMaps.day, group.dayId)
+    })),
+    manualActualGroupTags: data.manualActualGroupTags.map((entry) => ({
+      ...entry,
+      id: idMaps.manualActualGroupTag.get(entry.id)!,
+      manualActualGroupId: requireMappedId(
+        "ManualActualGroupTag.manualActualGroupId",
+        idMaps.manualActualGroup,
+        entry.manualActualGroupId
+      ),
+      tagId: requireMappedId("ManualActualGroupTag.tagId", idMaps.tag, entry.tagId)
+    })),
+    manualActualItems: data.manualActualItems.map((item) => ({
+      ...item,
+      id: idMaps.manualActualItem.get(item.id)!,
+      groupId: requireMappedId("ManualActualItem.groupId", idMaps.manualActualGroup, item.groupId)
+    })),
+    trashEntries: data.trashEntries.map((entry) => ({
+      ...entry,
+      id: idMaps.trashEntry.get(entry.id)!,
+      payload: remapTrashPayload(entry.kind, entry.payload, idMaps, trashIdMaps)
+    }))
+  };
 }
 
 export async function POST(request: NextRequest) {
@@ -225,7 +584,7 @@ export async function POST(request: NextRequest) {
       return NextResponse.json({ error: "暂不支持这个备份文件版本。" }, { status: 400 });
     }
 
-    validateImportCompleteness(parsed.data);
+    const data = remapImportData(parsed.data);
 
     await db.$transaction(async (tx) => {
       await tx.progressEntryTag.deleteMany({
@@ -288,9 +647,9 @@ export async function POST(request: NextRequest) {
         where: { userId: user.id }
       });
 
-      if (parsed.data.days.length) {
+      if (data.days.length) {
         await tx.day.createMany({
-          data: parsed.data.days.map((day) => ({
+          data: data.days.map((day) => ({
             id: day.id,
             userId: user.id,
             date: fromDateKey(day.date),
@@ -301,9 +660,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.weeks.length) {
+      if (data.weeks.length) {
         await tx.week.createMany({
-          data: parsed.data.weeks.map((week) => ({
+          data: data.weeks.map((week) => ({
             id: week.id,
             userId: user.id,
             weekStartDate: fromDateKey(week.weekStartDate),
@@ -314,9 +673,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.planSections.length) {
+      if (data.planSections.length) {
         await tx.planSection.createMany({
-          data: parsed.data.planSections.map((section) => ({
+          data: data.planSections.map((section) => ({
             id: section.id,
             userId: user.id,
             dayId: section.dayId,
@@ -332,9 +691,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.planItems.length) {
+      if (data.planItems.length) {
         await tx.planItem.createMany({
-          data: parsed.data.planItems.map((item) => ({
+          data: data.planItems.map((item) => ({
             id: item.id,
             userId: user.id,
             sectionId: item.sectionId,
@@ -351,9 +710,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.tags.length) {
+      if (data.tags.length) {
         await tx.tag.createMany({
-          data: parsed.data.tags.map((tag) => ({
+          data: data.tags.map((tag) => ({
             id: tag.id,
             userId: user.id,
             name: tag.name,
@@ -364,9 +723,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.planItemTags.length) {
+      if (data.planItemTags.length) {
         await tx.planItemTag.createMany({
-          data: parsed.data.planItemTags.map((entry) => ({
+          data: data.planItemTags.map((entry) => ({
             id: entry.id,
             userId: user.id,
             planItemId: entry.planItemId,
@@ -376,9 +735,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.planItemDayStates.length) {
+      if (data.planItemDayStates.length) {
         await tx.planItemDayState.createMany({
-          data: parsed.data.planItemDayStates.map((entry) => ({
+          data: data.planItemDayStates.map((entry) => ({
             id: entry.id,
             userId: user.id,
             planItemId: entry.planItemId,
@@ -390,9 +749,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.progressEntries.length) {
+      if (data.progressEntries.length) {
         await tx.progressEntry.createMany({
-          data: parsed.data.progressEntries.map((entry) => {
+          data: data.progressEntries.map((entry) => {
             const legacyMinuteSeed = new Date(entry.createdAt);
             const legacyStartMinute = legacyMinuteSeed.getHours() * 60 + legacyMinuteSeed.getMinutes();
 
@@ -412,9 +771,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.progressEntryTags.length) {
+      if (data.progressEntryTags.length) {
         await tx.progressEntryTag.createMany({
-          data: parsed.data.progressEntryTags.map((entry) => ({
+          data: data.progressEntryTags.map((entry) => ({
             id: entry.id,
             userId: user.id,
             progressEntryId: entry.progressEntryId,
@@ -424,11 +783,11 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.noteEntries.length) {
-        const planItemIds = new Set(parsed.data.planItems.map((item) => item.id));
+      if (data.noteEntries.length) {
+        const planItemIds = new Set(data.planItems.map((item) => item.id));
 
         await tx.noteEntry.createMany({
-          data: parsed.data.noteEntries.map((entry) => ({
+          data: data.noteEntries.map((entry) => ({
             id: entry.id,
             userId: user.id,
             dayId: entry.dayId,
@@ -442,8 +801,8 @@ export async function POST(request: NextRequest) {
           }))
         });
       } else {
-        const planItemIds = new Set(parsed.data.planItems.map((item) => item.id));
-        const noteRows = parsed.data.days.flatMap((day) =>
+        const planItemIds = new Set(data.planItems.map((item) => item.id));
+        const noteRows = data.days.flatMap((day) =>
           parseNoteEntries(day.note).map((entry, index) => {
             if (entry.kind === "project") {
               return {
@@ -480,9 +839,9 @@ export async function POST(request: NextRequest) {
         }
       }
 
-      if (parsed.data.manualActualGroups.length) {
+      if (data.manualActualGroups.length) {
         await tx.manualActualGroup.createMany({
-          data: parsed.data.manualActualGroups.map((group) => ({
+          data: data.manualActualGroups.map((group) => ({
             id: group.id,
             userId: user.id,
             dayId: group.dayId,
@@ -494,9 +853,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.manualActualGroupTags.length) {
+      if (data.manualActualGroupTags.length) {
         await tx.manualActualGroupTag.createMany({
-          data: parsed.data.manualActualGroupTags.map((entry) => ({
+          data: data.manualActualGroupTags.map((entry) => ({
             id: entry.id,
             userId: user.id,
             manualActualGroupId: entry.manualActualGroupId,
@@ -506,9 +865,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.manualActualItems.length) {
+      if (data.manualActualItems.length) {
         await tx.manualActualItem.createMany({
-          data: parsed.data.manualActualItems.map((item) => ({
+          data: data.manualActualItems.map((item) => ({
             id: item.id,
             groupId: item.groupId,
             content: item.content,
@@ -519,9 +878,9 @@ export async function POST(request: NextRequest) {
         });
       }
 
-      if (parsed.data.trashEntries.length) {
+      if (data.trashEntries.length) {
         await tx.trashEntry.createMany({
-          data: parsed.data.trashEntries.map((entry) => ({
+          data: data.trashEntries.map((entry) => ({
             id: entry.id,
             userId: user.id,
             kind: entry.kind,
@@ -539,15 +898,15 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       ok: true,
       counts: {
-        days: parsed.data.days.length,
-        weeks: parsed.data.weeks.length,
-        planItems: parsed.data.planItems.length,
-        tags: parsed.data.tags.length,
-        progressEntries: parsed.data.progressEntries.length,
-        noteEntries: parsed.data.noteEntries.length,
-        progressEntryTags: parsed.data.progressEntryTags.length,
-        manualActualGroupTags: parsed.data.manualActualGroupTags.length,
-        trashEntries: parsed.data.trashEntries.length
+        days: data.days.length,
+        weeks: data.weeks.length,
+        planItems: data.planItems.length,
+        tags: data.tags.length,
+        progressEntries: data.progressEntries.length,
+        noteEntries: data.noteEntries.length,
+        progressEntryTags: data.progressEntryTags.length,
+        manualActualGroupTags: data.manualActualGroupTags.length,
+        trashEntries: data.trashEntries.length
       }
     });
   } catch (error) {

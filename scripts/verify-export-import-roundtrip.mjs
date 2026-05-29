@@ -146,12 +146,32 @@ function sortById(values) {
   return [...values].sort((left, right) => left.id.localeCompare(right.id));
 }
 
-function normalizeNewEntitySlices(payload) {
-  return {
-    progressEntryTags: sortById(payload.data.progressEntryTags ?? []),
-    manualActualGroupTags: sortById(payload.data.manualActualGroupTags ?? []),
-    trashEntries: sortById(payload.data.trashEntries ?? [])
-  };
+function sortStrings(values) {
+  return [...values].sort((left, right) => left.localeCompare(right));
+}
+
+function stripIdLikeFields(value) {
+  if (Array.isArray(value)) {
+    return value.map(stripIdLikeFields);
+  }
+
+  if (!value || typeof value !== "object") {
+    return value;
+  }
+
+  return Object.fromEntries(
+    Object.entries(value)
+      .filter(([key]) => key !== "id" && !key.endsWith("Id") && !key.endsWith("Ids"))
+      .map(([key, entryValue]) => [key, stripIdLikeFields(entryValue)])
+  );
+}
+
+function findTaggedFreeProgress(state, content) {
+  return state.day.progressEntries.find((entry) => entry.planItemId === null && entry.content === content);
+}
+
+function findManualGroup(state, title) {
+  return state.day.manualActualGroups.find((group) => group.title === title);
 }
 
 function findTodaySection(state) {
@@ -228,36 +248,61 @@ async function main() {
   });
 
   const sourceExport = await exportBackup(sourceCookie);
+  const sourceTrashEntry = sourceExport.data.trashEntries.find(
+    (entry) => entry.kind === "plan-item" && entry.title === trashPlanTitle
+  );
 
   assert(sourceExport.meta.exportVersion === 5, "导出版本应该升级到 5。");
   assert(sourceExport.data.progressEntryTags.length > 0, "v5 备份里应该包含 ProgressEntryTag。");
   assert(sourceExport.data.manualActualGroupTags.length > 0, "v5 备份里应该包含 ManualActualGroupTag。");
   assert(sourceExport.data.trashEntries.length > 0, "v5 备份里应该包含 TrashEntry。");
+  assert(sourceTrashEntry, "源备份里应该包含刚删除的计划项回收站条目。");
 
   await importBackup(targetCookie, sourceExport);
 
+  const targetState = await readState(targetCookie);
   const targetExport = await exportBackup(targetCookie);
-  const sourceSlices = normalizeNewEntitySlices(sourceExport);
-  const targetSlices = normalizeNewEntitySlices(targetExport);
+  const targetTrashEntry = targetExport.data.trashEntries.find(
+    (entry) => entry.kind === "plan-item" && entry.title === trashPlanTitle
+  );
 
   await runCheck("free progress tags round-trip", async () => {
+    const importedFreeProgress = findTaggedFreeProgress(targetState, freeProgressTitle);
+
+    assert(importedFreeProgress, "导入后没有找到自由进展条目。");
     assert(
-      JSON.stringify(targetSlices.progressEntryTags) === JSON.stringify(sourceSlices.progressEntryTags),
-      "ProgressEntryTag 在导入导出后没有保持一致。"
+      JSON.stringify(sortStrings(importedFreeProgress.tags)) === JSON.stringify(["focus", "ship"]),
+      "导入后的自由进展标签不正确。"
+    );
+    assert(
+      targetExport.data.progressEntryTags.length === sourceExport.data.progressEntryTags.length,
+      "ProgressEntryTag 导入后数量不一致。"
     );
   });
 
   await runCheck("manual actual group tags round-trip", async () => {
+    const importedManualGroup = findManualGroup(targetState, manualGroupTitle);
+
+    assert(importedManualGroup, "导入后没有找到手动实际分组。");
     assert(
-      JSON.stringify(targetSlices.manualActualGroupTags) === JSON.stringify(sourceSlices.manualActualGroupTags),
-      "ManualActualGroupTag 在导入导出后没有保持一致。"
+      JSON.stringify(sortStrings(importedManualGroup.tags)) === JSON.stringify(["manual", "review"]),
+      "导入后的手动实际分组标签不正确。"
+    );
+    assert(
+      targetExport.data.manualActualGroupTags.length === sourceExport.data.manualActualGroupTags.length,
+      "ManualActualGroupTag 导入后数量不一致。"
     );
   });
 
   await runCheck("trash entries round-trip", async () => {
+    assert(targetTrashEntry, "导入后导出的备份里缺少预期回收站条目。");
     assert(
-      JSON.stringify(targetSlices.trashEntries) === JSON.stringify(sourceSlices.trashEntries),
-      "TrashEntry 在导入导出后没有保持一致。"
+      JSON.stringify(stripIdLikeFields(targetTrashEntry)) === JSON.stringify(stripIdLikeFields(sourceTrashEntry)),
+      "TrashEntry 在导入导出后没有保持语义一致。"
+    );
+    assert(
+      targetExport.data.trashEntries.length === sourceExport.data.trashEntries.length,
+      "TrashEntry 导入后数量不一致。"
     );
 
     const trashState = await readTrash(targetCookie);

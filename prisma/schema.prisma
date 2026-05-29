@@ -27,6 +27,7 @@ model User {
   progressEntries    ProgressEntry[]
   noteEntries        NoteEntry[]
   manualActualGroups ManualActualGroup[]
+  actualHiddenEntries ActualHiddenEntry[]
   trashEntries       TrashEntry[]
   sessions           Session[]
 }
@@ -70,6 +71,7 @@ model Day {
   progressEntries    ProgressEntry[]
   noteEntries        NoteEntry[]
   manualActualGroups ManualActualGroup[]
+  actualHiddenEntries ActualHiddenEntry[]
 
   @@unique([userId, date])
   @@index([userId, date])
@@ -268,6 +270,21 @@ model ManualActualGroupTag {
   @@unique([manualActualGroupId, tagId])
   @@index([userId, tagId])
   @@index([userId, manualActualGroupId])
+}
+
+model ActualHiddenEntry {
+  id         String   @id @default(cuid())
+  userId     String
+  dayId      String
+  targetType String
+  groupKind  String
+  targetId   String
+  createdAt  DateTime @default(now())
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  day        Day      @relation(fields: [dayId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, dayId, targetType, groupKind, targetId])
+  @@index([userId, dayId])
 }
 
 model ManualActualItem {

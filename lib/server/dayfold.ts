@@ -10,11 +10,13 @@ import {
   type User,
   type Week
 } from "@/generated/prisma";
+import { randomUUID } from "node:crypto";
 import type { DayfoldSnapshot, WeekDaySnapshot } from "@/lib/api-types";
 import {
   buildActualGroups,
   dedupeTagNames,
   normalizeTagName,
+  type ActualGroup,
   type DayState,
   type PlanSection as ClientPlanSection,
   type WeekTagSummary
@@ -27,7 +29,20 @@ type PlanItemWithTags = Prisma.PlanItemGetPayload<{
   include: {
     sourceItem: {
       include: {
-        sourceItem: true;
+        tags: {
+          include: {
+            tag: true;
+          };
+        };
+        sourceItem: {
+          include: {
+            tags: {
+              include: {
+                tag: true;
+              };
+            };
+          };
+        };
       };
     };
     tags: {
@@ -39,6 +54,7 @@ type PlanItemWithTags = Prisma.PlanItemGetPayload<{
 }>;
 
 type TagTargetKind = "linked" | "manual" | "free";
+type ActualHiddenTargetType = "group" | "item";
 
 type PersistedNoteEntry = Prisma.NoteEntryGetPayload<Record<string, never>>;
 
@@ -114,8 +130,14 @@ function getDerivedTodayPlanSource(item: {
         id: string;
         title: string;
         sectionKind: SectionKind;
+        tags?: Array<{ tag: { id: string; name: string } }>;
         sourceItemId?: string | null;
-        sourceItem?: { id: string; title: string; sectionKind: SectionKind } | null;
+        sourceItem?: {
+          id: string;
+          title: string;
+          sectionKind: SectionKind;
+          tags?: Array<{ tag: { id: string; name: string } }>;
+        } | null;
       }
     | null;
 }) {
@@ -136,6 +158,71 @@ function getDerivedTodayPlanSource(item: {
   }
 
   return null;
+}
+
+function getCanonicalTagSource(item: {
+  sourceItemId: string | null;
+  sourceItem?:
+    | {
+        id: string;
+        title: string;
+        sectionKind: SectionKind;
+        tags?: Array<{ tag: { id: string; name: string } }>;
+        sourceItemId?: string | null;
+        sourceItem?: {
+          id: string;
+          title: string;
+          sectionKind: SectionKind;
+          tags?: Array<{ tag: { id: string; name: string } }>;
+        } | null;
+      }
+    | null;
+}) {
+  if (!item.sourceItemId || !item.sourceItem) {
+    return null;
+  }
+
+  if (
+    item.sourceItem.sectionKind === SectionKind.TODAY &&
+    item.sourceItem.sourceItem &&
+    (item.sourceItem.sourceItem.sectionKind === SectionKind.WEEK || item.sourceItem.sourceItem.sectionKind === SectionKind.LONG)
+  ) {
+    return item.sourceItem.sourceItem;
+  }
+
+  return item.sourceItem;
+}
+
+function mapTagEntries(tagEntries: Array<{ tag: { id: string; name: string } }> | undefined) {
+  return (tagEntries ?? []).map((entry) => ({
+    id: entry.tag.id,
+    name: entry.tag.name
+  }));
+}
+
+function actualHiddenKey(targetType: ActualHiddenTargetType, groupKind: TagTargetKind, targetId: string) {
+  return `${targetType}:${groupKind}:${targetId}`;
+}
+
+function filterHiddenActualGroups(
+  groups: ActualGroup[],
+  hiddenEntries: Array<{ targetType: string; groupKind: string; targetId: string }>
+) {
+  if (!hiddenEntries.length) {
+    return groups;
+  }
+
+  const hidden = new Set(hiddenEntries.map((entry) => `${entry.targetType}:${entry.groupKind}:${entry.targetId}`));
+
+  return groups
+    .filter((group) => !hidden.has(actualHiddenKey("group", group.kind, group.id)))
+    .map((group) => {
+      const hadItems = group.items.length > 0;
+      const items = group.items.filter((item) => !hidden.has(actualHiddenKey("item", group.kind, item.id)));
+      return { ...group, items, hadItems };
+    })
+    .filter((group) => group.kind === "manual" || group.kind === "free" || group.items.length > 0 || !group.hadItems)
+    .map(({ hadItems, ...group }) => group);
 }
 
 function isDerivedTodayPlan(item: Parameters<typeof getDerivedTodayPlanSource>[0]) {
@@ -229,7 +316,20 @@ async function getPlanItemOrThrow(userId: string, planItemId: string) {
     include: {
       sourceItem: {
         include: {
-          sourceItem: true
+          tags: {
+            include: {
+              tag: true
+            }
+          },
+          sourceItem: {
+            include: {
+              tags: {
+                include: {
+                  tag: true
+                }
+              }
+            }
+          }
         }
       },
       tags: {
@@ -314,6 +414,32 @@ async function syncPlanItemTags(
     })),
     skipDuplicates: true
   });
+}
+
+async function getCanonicalTagTargetPlanItemId(
+  tx: Prisma.TransactionClient,
+  userId: string,
+  planItemId: string
+) {
+  const item = await tx.planItem.findFirst({
+    where: {
+      id: planItemId,
+      userId
+    },
+    include: {
+      sourceItem: {
+        include: {
+          sourceItem: true
+        }
+      }
+    }
+  });
+
+  if (!item) {
+    throw new Error("Plan item not found.");
+  }
+
+  return getCanonicalTagSource(item)?.id ?? item.id;
 }
 
 async function upsertTags(tx: Prisma.TransactionClient, userId: string, tagNames: string[]) {
@@ -1147,6 +1273,7 @@ function mapItemsForSection(
       .map((item) => {
         const derivedTodayPlanSource = getDerivedTodayPlanSource(item);
         const derivedTodayPlan = Boolean(derivedTodayPlanSource);
+        const tagSource = getCanonicalTagSource(item) ?? item;
         return {
           id: item.id,
           title: item.title,
@@ -1155,10 +1282,7 @@ function mapItemsForSection(
           sourceItemId: derivedTodayPlanSource?.id ?? null,
           sourceTitle: derivedTodayPlanSource?.title ?? null,
           isDerivedTodayPlan: derivedTodayPlan,
-          tags: item.tags.map((entry) => ({
-            id: entry.tag.id,
-            name: entry.tag.name
-          })),
+          tags: mapTagEntries(tagSource.tags),
           displayOrder: item.displayOrder
         };
       })
@@ -1191,7 +1315,20 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
       include: {
         sourceItem: {
           include: {
-            sourceItem: true
+            tags: {
+              include: {
+                tag: true
+              }
+            },
+            sourceItem: {
+              include: {
+                tags: {
+                  include: {
+                    tag: true
+                  }
+                }
+              }
+            }
           }
         },
         tags: {
@@ -1211,7 +1348,20 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
       include: {
         sourceItem: {
           include: {
-            sourceItem: true
+            tags: {
+              include: {
+                tag: true
+              }
+            },
+            sourceItem: {
+              include: {
+                tags: {
+                  include: {
+                    tag: true
+                  }
+                }
+              }
+            }
           }
         },
         tags: {
@@ -1231,7 +1381,20 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
       include: {
         sourceItem: {
           include: {
-            sourceItem: true
+            tags: {
+              include: {
+                tag: true
+              }
+            },
+            sourceItem: {
+              include: {
+                tags: {
+                  include: {
+                    tag: true
+                  }
+                }
+              }
+            }
           }
         },
         tags: {
@@ -1252,7 +1415,20 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
           include: {
             sourceItem: {
               include: {
-                sourceItem: true
+                tags: {
+                  include: {
+                    tag: true
+                  }
+                },
+                sourceItem: {
+                  include: {
+                    tags: {
+                      include: {
+                        tag: true
+                      }
+                    }
+                  }
+                }
               }
             },
             tags: {
@@ -1398,6 +1574,7 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
     progressEntries: progressEntries.map((entry) => {
       const derivedTodayPlanSource = entry.planItem ? getDerivedTodayPlanSource(entry.planItem) : null;
       const derivedTodayPlan = Boolean(derivedTodayPlanSource);
+      const tagSource = entry.planItem ? getCanonicalTagSource(entry.planItem) ?? entry.planItem : null;
       return {
         id: entry.id,
         planItemId: entry.planItemId,
@@ -1406,10 +1583,7 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
         planItemTitle: derivedTodayPlan ? entry.planItem?.title ?? null : null,
         isDerivedTodayPlan: derivedTodayPlan,
         tags: entry.planItemId
-          ? entry.planItem?.tags.map((tagEntry) => ({
-              id: tagEntry.tag.id,
-              name: tagEntry.tag.name
-            })) ?? []
+          ? mapTagEntries(tagSource?.tags)
           : entry.tags.map((tagEntry) => ({
               id: tagEntry.tag.id,
               name: tagEntry.tag.name
@@ -1441,12 +1615,17 @@ async function buildDayStateForDate(user: User, date: Date): Promise<{ day: DayS
 }
 
 async function buildWeekDayBundle(user: User, dateKey: string): Promise<{ snapshot: WeekDaySnapshot; day: DayState }> {
-  const { day } = await buildDayStateForDate(user, fromDateKey(dateKey));
+  const { day, dayRecord } = await buildDayStateForDate(user, fromDateKey(dateKey));
+  const hiddenEntries = await db.$queryRaw<Array<{ targetType: string; groupKind: string; targetId: string }>>`
+    SELECT "targetType", "groupKind", "targetId"
+    FROM "ActualHiddenEntry"
+    WHERE "userId" = ${user.id} AND "dayId" = ${dayRecord.id}
+  `;
   return {
     snapshot: {
       dateKey,
       note: day.note,
-      actualGroups: buildActualGroups(day)
+      actualGroups: filterHiddenActualGroups(buildActualGroups(day), hiddenEntries)
     },
     day
   };
@@ -1548,21 +1727,26 @@ function buildWeekTagSummaries(weekDayBundles: Array<{ snapshot: WeekDaySnapshot
 
 export async function getDayfoldSnapshot(user: User, selectedDateKey: string): Promise<DayfoldSnapshot> {
   const selectedDate = fromDateKey(selectedDateKey);
-  const { day } = await buildDayStateForDate(user, selectedDate);
+  const { day, dayRecord } = await buildDayStateForDate(user, selectedDate);
   const week = await ensureWeek(user.id, getWeekStart(selectedDate));
   const weekDayKeys = getWeekDateKeys(selectedDate);
-  const [weekDayBundles, availableTags] = await Promise.all([
+  const [weekDayBundles, availableTags, hiddenEntries] = await Promise.all([
     Promise.all(weekDayKeys.map((dateKey) => buildWeekDayBundle(user, dateKey))),
     db.tag.findMany({
       where: { userId: user.id },
       orderBy: [{ name: "asc" }]
-    })
+    }),
+    db.$queryRaw<Array<{ targetType: string; groupKind: string; targetId: string }>>`
+      SELECT "targetType", "groupKind", "targetId"
+      FROM "ActualHiddenEntry"
+      WHERE "userId" = ${user.id} AND "dayId" = ${dayRecord.id}
+    `
   ]);
 
   return {
     selectedDateKey,
     day,
-    dayActualGroups: buildActualGroups(day),
+    dayActualGroups: filterHiddenActualGroups(buildActualGroups(day), hiddenEntries),
     weekReview: week.review,
     weekDays: weekDayBundles.map((bundle) => bundle.snapshot),
     availableTags: availableTags.map((tag) => ({
@@ -1804,7 +1988,8 @@ export async function renamePlanItemMutation(params: {
     });
 
     if (params.tags) {
-      await syncPlanItemTags(tx, user.id, params.planItemId, params.tags);
+      const tagTargetPlanItemId = await getCanonicalTagTargetPlanItemId(tx, user.id, params.planItemId);
+      await syncPlanItemTags(tx, user.id, tagTargetPlanItemId, params.tags);
     }
   });
 }
@@ -1819,10 +2004,23 @@ export async function deletePlanItemMutation(params: { user: User; planItemId: s
       title: payload.item.title,
       payload
     });
-    await tx.planItem.deleteMany({
+    const item = await tx.planItem.findFirst({
       where: {
         id: params.planItemId,
         userId: user.id
+      },
+      select: {
+        sourceItemId: true
+      }
+    });
+    const shouldDeleteCopies = !item?.sourceItemId;
+    await tx.planItem.deleteMany({
+      where: {
+        userId: user.id,
+        OR: [
+          { id: params.planItemId },
+          ...(shouldDeleteCopies ? [{ sourceItemId: params.planItemId }] : [])
+        ]
       }
     });
   });
@@ -2105,7 +2303,8 @@ export async function updateActualGroupTagsMutation(params: {
         }
       });
       if (!item) throw new Error("Plan item not found.");
-      await syncPlanItemTags(tx, user.id, params.groupId, params.tags);
+      const tagTargetPlanItemId = await getCanonicalTagTargetPlanItemId(tx, user.id, params.groupId);
+      await syncPlanItemTags(tx, user.id, tagTargetPlanItemId, params.tags);
       return;
     }
 
@@ -2187,6 +2386,32 @@ export async function deleteManualActualItemMutation(params: { user: User; itemI
       }
     });
   });
+}
+
+export async function dismissActualEntryMutation(params: {
+  user: User;
+  selectedDateKey: string;
+  targetType: ActualHiddenTargetType;
+  groupKind: TagTargetKind;
+  targetId: string;
+}) {
+  const day = await ensureDay(params.user.id, fromDateKey(params.selectedDateKey));
+
+  if (params.groupKind === "manual") {
+    if (params.targetType === "group") {
+      await deleteManualActualGroupMutation({ user: params.user, groupId: params.targetId });
+      return;
+    }
+
+    await deleteManualActualItemMutation({ user: params.user, itemId: params.targetId });
+    return;
+  }
+
+  await db.$executeRaw`
+    INSERT INTO "ActualHiddenEntry" ("id", "userId", "dayId", "targetType", "groupKind", "targetId")
+    VALUES (${randomUUID()}, ${params.user.id}, ${day.id}, ${params.targetType}, ${params.groupKind}, ${params.targetId})
+    ON CONFLICT ("userId", "dayId", "targetType", "groupKind", "targetId") DO NOTHING
+  `;
 }
 
 export async function saveDayNoteMutation(params: {

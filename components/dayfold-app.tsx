@@ -61,7 +61,7 @@ type ActualDraft = {
 };
 
 type ProjectNoteDraft = {
-  itemId: string;
+  itemId: string | null;
   title: string;
   content: string;
 };
@@ -2256,14 +2256,29 @@ export function DayfoldApp({
   function renamePlanItemOptimistically(planItemId: string, title: string, tags?: TagChip[]): SnapshotUpdater {
     return (current) => {
       const next = cloneSnapshot(current);
+      let tagTargetId: string | null = null;
+
+      if (tags) {
+        next.day.planSections.forEach((section) => {
+          section.items.forEach((item) => {
+            if (item.id === planItemId) {
+              tagTargetId = item.sourceItemId ?? item.id;
+            }
+          });
+        });
+      }
+
       next.day.planSections = next.day.planSections.map((section) => ({
         ...section,
         items: section.items.map((item) => {
           if (item.id === planItemId) {
             return { ...item, title, tags: tags ?? item.tags };
           }
+          if (tags && tagTargetId && (item.id === tagTargetId || item.sourceItemId === tagTargetId)) {
+            return { ...item, tags };
+          }
           if (item.isDerivedTodayPlan && item.sourceItemId === planItemId) {
-            return { ...item, sourceTitle: title };
+            return { ...item, sourceTitle: title, tags: tags ?? item.tags };
           }
           return item;
         })
@@ -2271,17 +2286,21 @@ export function DayfoldApp({
       next.day.progressEntries = next.day.progressEntries.map((entry) =>
         entry.planItemId === planItemId
           ? entry.isDerivedTodayPlan
-            ? { ...entry, planItemTitle: title }
-            : { ...entry, sourceTitle: title }
+            ? { ...entry, planItemTitle: title, tags: tags ?? entry.tags }
+            : { ...entry, sourceTitle: title, tags: tags ?? entry.tags }
           : entry.isDerivedTodayPlan && entry.sourceItemId === planItemId
-            ? { ...entry, sourceTitle: title }
+            ? { ...entry, sourceTitle: title, tags: tags ?? entry.tags }
+            : tags && tagTargetId && (entry.planItemId === tagTargetId || entry.sourceItemId === tagTargetId)
+            ? { ...entry, tags }
             : entry
       );
       next.dayActualGroups = buildActualGroups(next.day);
       next.weekDays = next.weekDays.map((entry) => ({
         ...entry,
         actualGroups: entry.actualGroups.map((group) =>
-          group.kind === "linked" && group.id === planItemId ? { ...group, title } : group
+          group.kind === "linked" && (group.id === planItemId || (tagTargetId && group.id === tagTargetId))
+            ? { ...group, title: group.id === planItemId ? title : group.title, tags: tags ?? group.tags }
+            : group
         )
       }));
       return next;
@@ -2464,6 +2483,44 @@ export function DayfoldApp({
                 .filter((group) => group.items.length || group.kind === "manual" || group.kind === "free")
             : entry.actualGroups
       }));
+      return next;
+    };
+  }
+
+  function dismissActualEntryOptimistically(
+    targetType: "group" | "item",
+    groupKind: ActualGroup["kind"],
+    targetId: string,
+    dateKey = selectedDateKey
+  ): SnapshotUpdater {
+    return (current) => {
+      const next = cloneSnapshot(current);
+      const filterGroups = (groups: ActualGroup[]) =>
+        groups
+          .filter((group) => !(targetType === "group" && group.kind === groupKind && group.id === targetId))
+          .map((group) => {
+            const hadItems = group.items.length > 0;
+            const items =
+              targetType === "item" && group.kind === groupKind
+                ? group.items.filter((item) => item.id !== targetId)
+                : group.items;
+            return { ...group, items, hadItems };
+          })
+          .filter((group) => group.kind === "manual" || group.kind === "free" || group.items.length > 0 || !group.hadItems)
+          .map(({ hadItems, ...group }) => group);
+
+      if (dateKey === selectedDateKey) {
+        next.dayActualGroups = filterGroups(next.dayActualGroups);
+      }
+
+      next.weekDays = next.weekDays.map((entry) =>
+        entry.dateKey === dateKey
+          ? {
+              ...entry,
+              actualGroups: filterGroups(entry.actualGroups)
+            }
+          : entry
+      );
       return next;
     };
   }
@@ -2945,15 +3002,18 @@ export function DayfoldApp({
       }
       onRenameItem={(itemId, title, options) => {
         if (options?.preserveTags) {
-          const nextTitle = normalize(title);
+          const parsed = parsePlanInput(title);
+          const nextTitle = parsed.title || normalize(title);
+          const nextTags = parsed.tags.length ? toTagChips(parsed.tags) : undefined;
           return commit({
             action: "rename-plan-item",
             selectedDateKey,
             planItemId: itemId,
-            title: nextTitle
+            title: nextTitle,
+            ...(parsed.tags.length ? { tags: parsed.tags } : {})
           }, {
             successMessage: "计划名称已更新",
-            optimisticUpdate: renamePlanItemOptimistically(itemId, nextTitle)
+            optimisticUpdate: renamePlanItemOptimistically(itemId, nextTitle, nextTags)
           });
         }
         const parsed = parsePlanInput(title);
@@ -3452,6 +3512,13 @@ export function DayfoldApp({
                     key={`${group.kind}-${group.id}`}
                     group={group}
                     onEditTags={() => setActualTagDraft({ group, value: serializeTagsForInput(group.tags) })}
+                    onAddProjectNote={() =>
+                      setProjectNoteDraft({
+                        itemId: group.kind === "linked" ? group.id : null,
+                        title: group.title,
+                        content: ""
+                      })
+                    }
                     onRenameGroup={(title) => {
                       if (group.kind === "linked") {
                         return commit({
@@ -3496,50 +3563,35 @@ export function DayfoldApp({
                       }, { successMessage: "内容已更新", optimisticUpdate: updateManualItemOptimistically(itemId, content) });
                     }}
                     onDeleteGroup={() => {
-                      if (group.kind === "linked") {
-                        return commit({
-                          action: "delete-plan-item",
-                          selectedDateKey,
-                          planItemId: group.id
-                        }, { successMessage: "项目已删除", successToast: true, optimisticUpdate: deletePlanItemOptimistically(group.id) });
-                      }
-                      if (group.kind === "free") {
-                        return commit({
-                          action: "delete-progress-entry",
-                          selectedDateKey,
-                          progressEntryId: group.id
-                        }, {
-                          successMessage: "项目已删除",
-                          successToast: true,
-                          optimisticUpdate: deleteProgressOptimistically(group.id)
-                        });
-                      }
                       return commit({
-                        action: "delete-manual-actual-group",
+                        action: "dismiss-actual-entry",
                         selectedDateKey,
-                        groupId: group.id
+                        targetType: "group",
+                        groupKind: group.kind,
+                        targetId: group.id
                       }, {
                         successMessage: "项目已删除",
                         successToast: true,
-                        optimisticUpdate: deleteManualGroupOptimistically(group.id, selectedDateKey)
+                        optimisticUpdate:
+                          group.kind === "manual"
+                            ? deleteManualGroupOptimistically(group.id, selectedDateKey)
+                            : dismissActualEntryOptimistically("group", group.kind, group.id)
                       });
                     }}
                     onDeleteItem={(itemId) => {
-                      if (group.kind === "linked") {
-                        return commit({
-                          action: "delete-progress-entry",
-                          selectedDateKey,
-                          progressEntryId: itemId
-                        }, { successMessage: "条目已删除", successToast: true, optimisticUpdate: deleteProgressOptimistically(itemId) });
-                      }
                       return commit({
-                        action: "delete-manual-actual-item",
+                        action: "dismiss-actual-entry",
                         selectedDateKey,
-                        itemId
+                        targetType: "item",
+                        groupKind: group.kind,
+                        targetId: itemId
                       }, {
                         successMessage: "条目已删除",
                         successToast: true,
-                        optimisticUpdate: deleteManualItemOptimistically(itemId, selectedDateKey)
+                        optimisticUpdate:
+                          group.kind === "manual"
+                            ? deleteManualItemOptimistically(itemId, selectedDateKey)
+                            : dismissActualEntryOptimistically("item", group.kind, itemId)
                       });
                     }}
                   />
@@ -3696,72 +3748,40 @@ export function DayfoldApp({
                               );
                             }}
                             onDeleteGroup={() => {
-                              if (group.kind === "linked") {
-                                return commit(
-                                  {
-                                    action: "delete-plan-item",
-                                    selectedDateKey: entry.dateKey,
-                                    planItemId: group.id
-                                  },
-                                  {
-                                    successMessage: "项目已删除",
-                                    successToast: true,
-                                    optimisticUpdate: deletePlanItemOptimistically(group.id)
-                                  }
-                                );
-                              }
-                              if (group.kind === "free") {
-                                return commit(
-                                  {
-                                    action: "delete-progress-entry",
-                                    selectedDateKey: entry.dateKey,
-                                    progressEntryId: group.id
-                                  },
-                                  {
-                                    successMessage: "项目已删除",
-                                    successToast: true,
-                                    optimisticUpdate: deleteProgressOptimistically(group.id, entry.dateKey)
-                                  }
-                                );
-                              }
                               return commit(
                                 {
-                                  action: "delete-manual-actual-group",
+                                  action: "dismiss-actual-entry",
                                   selectedDateKey: entry.dateKey,
-                                  groupId: group.id
+                                  targetType: "group",
+                                  groupKind: group.kind,
+                                  targetId: group.id
                                 },
                                 {
                                   successMessage: "项目已删除",
                                   successToast: true,
-                                  optimisticUpdate: deleteManualGroupOptimistically(group.id, entry.dateKey)
+                                  optimisticUpdate:
+                                    group.kind === "manual"
+                                      ? deleteManualGroupOptimistically(group.id, entry.dateKey)
+                                      : dismissActualEntryOptimistically("group", group.kind, group.id, entry.dateKey)
                                 }
                               );
                             }}
                             onDeleteItem={(itemId) => {
-                              if (group.kind === "linked") {
-                                return commit(
-                                  {
-                                    action: "delete-progress-entry",
-                                    selectedDateKey: entry.dateKey,
-                                    progressEntryId: itemId
-                                  },
-                                  {
-                                    successMessage: "条目已删除",
-                                    successToast: true,
-                                    optimisticUpdate: deleteProgressOptimistically(itemId, entry.dateKey)
-                                  }
-                                );
-                              }
                               return commit(
                                 {
-                                  action: "delete-manual-actual-item",
+                                  action: "dismiss-actual-entry",
                                   selectedDateKey: entry.dateKey,
-                                  itemId
+                                  targetType: "item",
+                                  groupKind: group.kind,
+                                  targetId: itemId
                                 },
                                 {
                                   successMessage: "条目已删除",
                                   successToast: true,
-                                  optimisticUpdate: deleteManualItemOptimistically(itemId, entry.dateKey)
+                                  optimisticUpdate:
+                                    group.kind === "manual"
+                                      ? deleteManualItemOptimistically(itemId, entry.dateKey)
+                                      : dismissActualEntryOptimistically("item", group.kind, itemId, entry.dateKey)
                                 }
                               );
                             }}
@@ -4543,6 +4563,7 @@ function PlanSectionCard({
             if (section.kind === "long") {
               menuItems.push({ label: "添加今日计划", onClick: () => onAddTodayPlan(item) });
             }
+            menuItems.push({ label: "笔记", onClick: () => onAddProjectNote(item) });
             menuItems.push({ label: "删除", tone: "danger" as const, onClick: () => onDeleteItem(item.id) });
 
             return (
@@ -4585,9 +4606,6 @@ function PlanSectionCard({
                   <button className="text-action" type="button" onClick={() => onLogProgress(item)}>
                     进展
                   </button>
-                  <button className="text-action" type="button" onClick={() => onAddProjectNote(item)}>
-                    笔记
-                  </button>
                   <MoreMenu items={menuItems} />
                 </div>
               </article>
@@ -4624,7 +4642,7 @@ function TourPlanExamples({ kind }: { kind: "today" | "week" | "long" }) {
           </div>
           <div className="plan-actions">
             <span className="text-action is-sample">进展</span>
-            <span className="text-action is-sample">笔记</span>
+            <span className="text-action is-sample">•••</span>
           </div>
         </article>
       ))}
@@ -4856,6 +4874,7 @@ function StructuredActualItemText({
 function ActualGroupCard({
   group,
   onEditTags,
+  onAddProjectNote,
   onRenameGroup,
   onRenameItem,
   onDeleteGroup,
@@ -4863,6 +4882,7 @@ function ActualGroupCard({
 }: {
   group: ActualGroup;
   onEditTags: () => void;
+  onAddProjectNote?: () => void;
   onRenameGroup: (title: string) => Promise<void>;
   onRenameItem: (itemId: string, content: string) => Promise<void>;
   onDeleteGroup: () => Promise<void>;
@@ -4885,7 +4905,13 @@ function ActualGroupCard({
           <InlineEditableText as="span" className="actual-title" value={group.title} onSave={onRenameGroup} />
         </div>
         <div className="row-actions">
-          <MoreMenu items={[{ label: "编辑标签", onClick: onEditTags }, { label: "删除", tone: "danger", onClick: onDeleteGroup }]} />
+          <MoreMenu
+            items={[
+              ...(onAddProjectNote ? [{ label: "笔记", onClick: onAddProjectNote }] : []),
+              { label: "编辑标签", onClick: onEditTags },
+              { label: "删除", tone: "danger", onClick: onDeleteGroup }
+            ]}
+          />
         </div>
       </div>
 
